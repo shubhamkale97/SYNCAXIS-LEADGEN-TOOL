@@ -129,8 +129,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json_response(400, {"error": str(error)})
         if self.path == "/api/alternative-search":
             return self.alternative_search(keyword, latitude, longitude, radius_km)
+        location_name = str(incoming.get("location", "")).strip()[:200]
+        search_term = f"{keyword} in {location_name}" if location_name else f"{keyword} near {latitude},{longitude}"
         payload = {
-            "name": "maps-lead-finder", "keywords": [keyword], "lang": "en",
+            "name": "maps-lead-finder", "keywords": [search_term], "lang": "en",
             "zoom": 15, "lat": lat, "lon": lon, "radius": int(radius_km * 1000),
             "depth": depth, "email": bool(incoming.get("email", False)),
             "fast_mode": False, "max_time": 600,
