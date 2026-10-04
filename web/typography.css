@@ -3,3 +3,7 @@ body{font-family:'IBM Plex Sans',sans-serif!important}body input,body select,bod
 
 
 
+
+.shell{width:calc(100% - clamp(32px,5vw,96px));max-width:none;margin-inline:auto}
+@media(max-width:575px){.shell{width:calc(100% - 28px)}}
+
