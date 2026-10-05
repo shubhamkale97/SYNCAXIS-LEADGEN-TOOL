@@ -115,11 +115,24 @@ The map shows the whole search visually:
 - the **shortlisted company** (when the field check returns a match) as a
   separate numbered marker, geocoded from its posting location.
 
-The provider is chosen by `GET /api/map-config`: **Google Maps** when
-`GOOGLE_MAPS_API_KEY` is set (needs the Maps JavaScript API enabled), otherwise
-**HERE** when `HERE_API_KEY` is set, otherwise keyless **OpenStreetMap** through
-the locally vendored Leaflet. Any provider needs outbound internet at runtime -
-the same requirement as geocoding.
+The provider is chosen by `GET /api/map-config` from `MAP_PROVIDER`
+(`auto` | `google` | `here` | `osm`):
+
+- **google** - needs `GOOGLE_MAPS_API_KEY` with the Maps JavaScript API enabled;
+- **here** - needs `HERE_API_KEY`; HERE raster tiles are served through the
+  locally vendored Leaflet;
+- **osm** - keyless OpenStreetMap through the same Leaflet.
+
+`auto` prefers Google, then HERE, then OpenStreetMap; a provider whose key is
+missing falls back to OpenStreetMap. The map key is sent to the browser (the map
+library needs it), so restrict it by HTTP referrer / allowed domain in the
+provider console. Any provider needs outbound internet at runtime - the same
+requirement as geocoding.
+
+**HERE free tier:** a HERE platform account includes a free monthly allowance
+(250,000 requests). Sign up, register an app in Access Manager, and generate an
+API key; a payment method is required on file but you are not charged while
+usage stays inside the free tier.
 
 ### Field check
 

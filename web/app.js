@@ -169,8 +169,8 @@ function pinIcon(label,kind){return L.divIcon({className:"map-pin-wrap",html:`<s
 function createLeafletView(el,cfg){
   const m=L.map(el).setView([20.5937,78.9629],5);
   const here=cfg.provider==="here"&&cfg.key;
-  const url=here?`https://maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png8?size=512&style=explore&apiKey=${encodeURIComponent(cfg.key)}`:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-  L.tileLayer(url,{maxZoom:19,attribution:here?"(c) HERE":"(c) OpenStreetMap"}).addTo(m);
+  const url=here?`https://maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png?size=512&style=explore.day&apiKey=${encodeURIComponent(cfg.key)}`:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+  L.tileLayer(url,{maxZoom:here?18:19,attribution:here?"(c) HERE":"(c) OpenStreetMap"}).addTo(m);
   const leadLayer=L.layerGroup().addTo(m),companyLayer=L.layerGroup().addTo(m);
   let areaMarker=null,areaCircle=null;
   setTimeout(()=>m.invalidateSize(),200);

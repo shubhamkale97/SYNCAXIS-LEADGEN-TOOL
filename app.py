@@ -111,15 +111,22 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/job-sources":
             return self.json_response(200, {"sources": available_sources()})
         if parsed.path == "/api/map-config":
-            # Prefer Google Maps, then HERE, then keyless OpenStreetMap. The key
-            # is sent to the browser so the map library can load; restrict it by
-            # HTTP referrer in the Google/HERE console.
-            if GOOGLE_MAPS_API_KEY:
+            # MAP_PROVIDER = auto | google | here | osm. "auto" prefers Google,
+            # then HERE, then keyless OpenStreetMap. A provider whose key is
+            # missing falls back to OpenStreetMap. The key is sent to the browser
+            # so the map library can load - restrict it by HTTP referrer / allowed
+            # domain in the Google or HERE console.
+            requested = os.environ.get("MAP_PROVIDER", "auto").strip().lower()
+            provider, key = "osm", ""
+            if requested == "google" and GOOGLE_MAPS_API_KEY:
                 provider, key = "google", GOOGLE_MAPS_API_KEY
-            elif HERE_API_KEY:
+            elif requested == "here" and HERE_API_KEY:
                 provider, key = "here", HERE_API_KEY
-            else:
-                provider, key = "osm", ""
+            elif requested not in ("google", "here", "osm"):
+                if GOOGLE_MAPS_API_KEY:
+                    provider, key = "google", GOOGLE_MAPS_API_KEY
+                elif HERE_API_KEY:
+                    provider, key = "here", HERE_API_KEY
             return self.json_response(200, {"provider": provider, "key": key})
         return super().do_GET()
 
