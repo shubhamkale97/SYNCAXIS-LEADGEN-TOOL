@@ -244,7 +244,7 @@ class EndpointTests(unittest.TestCase):
     def test_job_sources_listing(self):
         payload = self._get("/api/job-sources")
         names = {source["name"] for source in payload["sources"]}
-        self.assertEqual(names, {"linkedin", "adzuna", "jooble", "serpapi"})
+        self.assertEqual(names, {"ats", "linkedin", "jobspy", "adzuna", "jooble", "serpapi"})
 
     def test_company_genre_endpoint(self):
         original_search, original_infer = app.search_jobs, app.infer_genre
@@ -278,6 +278,87 @@ class EndpointTests(unittest.TestCase):
             self.fail("expected HTTP 400")
         except urllib.error.HTTPError as error:
             self.assertEqual(error.code, 400)
+
+
+class JobSpyMappingTests(unittest.TestCase):
+    def test_maps_list_of_dicts(self):
+        rows = [{
+            "title": "Design Engineer", "company": "Portescap", "location": "Pune",
+            "job_url": "https://x", "job_url_direct": "", "description": "servo motor",
+            "date_posted": "2026-09-01", "site": "linkedin",
+            "company_industry": "Electrical/Electronic Manufacturing",
+        }]
+        jobs = jobsources.jobspy_rows_to_jobs(rows)
+        self.assertEqual(jobs[0]["source"], "jobspy:linkedin")
+        self.assertEqual(jobs[0]["url"], "https://x")
+        self.assertEqual(jobs[0]["company_industry"], "Electrical/Electronic Manufacturing")
+
+    def test_maps_dataframe_like_and_nan(self):
+        class Frame:
+            def to_dict(self, *a, **k):
+                return [{"title": "CNC Machinist", "company": None, "location": float("nan"),
+                         "job_url": "https://y", "site": "indeed"}]
+        jobs = jobsources.jobspy_rows_to_jobs(Frame())
+        self.assertEqual(jobs[0]["company"], "")
+        self.assertEqual(jobs[0]["location"], "")
+        self.assertEqual(jobs[0]["source"], "jobspy:indeed")
+
+    def test_limit_applies(self):
+        rows = [{"title": f"t{i}", "job_url": "u", "site": "google"} for i in range(5)]
+        self.assertEqual(len(jobsources.jobspy_rows_to_jobs(rows, limit=2)), 2)
+
+
+class ATSTests(unittest.TestCase):
+    def setUp(self):
+        self._original = jobsources._http
+
+    def tearDown(self):
+        jobsources._http = self._original
+
+    def test_candidate_slugs(self):
+        self.assertEqual(jobsources.candidate_slugs("Portescap"), ["portescap"])
+        self.assertIn("acme-corp", jobsources.candidate_slugs("Acme Corp"))
+        self.assertEqual(jobsources.candidate_slugs(""), [])
+
+    def test_greenhouse_parsing(self):
+        payload = {"jobs": [{"title": "SMT Engineer", "location": {"name": "Pune, India"},
+                             "absolute_url": "https://gh/x", "content": "<p>soldering</p>",
+                             "updated_at": "2026-09-01T00:00:00Z"}]}
+        jobsources._http = lambda *a, **k: json.dumps(payload)
+        jobs = jobsources._fetch_ats("greenhouse", "acme")
+        self.assertEqual(jobs[0]["title"], "SMT Engineer")
+        self.assertEqual(jobs[0]["location"], "Pune, India")
+        self.assertEqual(jobs[0]["source"], "ats:greenhouse")
+
+    def test_lever_parsing(self):
+        payload = [{"text": "Motion Control Engineer", "categories": {"location": "Pune"},
+                    "descriptionPlain": "servo", "hostedUrl": "https://lv/x", "createdAt": 1}]
+        jobsources._http = lambda *a, **k: json.dumps(payload)
+        jobs = jobsources._fetch_ats("lever", "acme")
+        self.assertEqual(jobs[0]["title"], "Motion Control Engineer")
+        self.assertEqual(jobs[0]["source"], "ats:lever")
+
+    def test_ashby_parsing(self):
+        payload = {"jobs": [{"title": "Automation Engineer", "location": "Pune",
+                             "descriptionPlain": "plc", "jobUrl": "https://ab/x",
+                             "publishedAt": "2026-09-01"}]}
+        jobsources._http = lambda *a, **k: json.dumps(payload)
+        jobs = jobsources._fetch_ats("ashby", "acme")
+        self.assertEqual(jobs[0]["source"], "ats:ashby")
+
+    def test_search_filters_location_and_dedupes(self):
+        def fake_http(method, url, **kwargs):
+            if "greenhouse" in url:
+                return json.dumps({"jobs": [
+                    {"title": "SMT Engineer", "location": {"name": "Pune, India"}, "absolute_url": "https://gh/1", "content": ""},
+                    {"title": "SMT Engineer", "location": {"name": "Pune, India"}, "absolute_url": "https://gh/1", "content": ""},
+                    {"title": "Sales Manager", "location": {"name": "Mumbai, India"}, "absolute_url": "https://gh/2", "content": ""},
+                ]})
+            raise RuntimeError("no board here")
+        jobsources._http = fake_http
+        jobs = jobsources.ATSSource().search("Acme", "Pune")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["title"], "SMT Engineer")
 
 
 if __name__ == "__main__":

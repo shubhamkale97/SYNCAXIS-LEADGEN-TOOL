@@ -135,3 +135,39 @@ $("location").addEventListener("blur",()=>resolveTypedLocation());
 $("radius").addEventListener("input",()=>{$("radiusValue").textContent=`${$("radius").value} km`;});
 $("filter").addEventListener("input",render);$("downloadButton").addEventListener("click",downloadCsv);$("excelButton").addEventListener("click",downloadExcel);$("pdfButton").addEventListener("click",()=>{if(rows.length)window.print();});$("clearButton").addEventListener("click",()=>{if(confirm("Clear all collected leads from this page?")){rows=[];render();$("resultsMessage").textContent="Lead list cleared. Run a search to start again.";}});
 render();checkHealth();
+
+const genreForm = $("genreForm");
+if (genreForm) {
+  genreForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = $("genreButton");
+    const company = $("genreCompany").value.trim();
+    const city = $("genreCity").value.trim();
+    if (!company || !city) return;
+    button.disabled = true;
+    const box = $("genreResult");
+    box.classList.remove("hidden");
+    box.innerHTML = `<p class="results-message">Searching job postings for ${escapeHtml(company)} in ${escapeHtml(city)}…</p>`;
+    try {
+      const payload = await request("/api/company-genre", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ company, city }),
+      });
+      const g = payload.genre || {};
+      const conf = g.confidence != null ? ` · ${Math.round(g.confidence * 100)}% confidence` : "";
+      const titles = (payload.sample_titles || []).slice(0, 6).map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+      const sources = (payload.sources || []).map((s) => (s.error ? `${s.source}: unavailable` : `${s.source}: ${s.count}`)).join(" · ");
+      const industries = (g.observed_industries || []).length
+        ? `<p class="results-message">Reported industries: ${escapeHtml(g.observed_industries.join(", "))}</p>` : "";
+      box.innerHTML = `<div class="genre-head"><strong>${escapeHtml(g.genre || "No clear industry found")}</strong>`
+        + `<span class="source-pill">${escapeHtml(g.method || "n/a")}${escapeHtml(conf)}</span></div>`
+        + `<p class="results-message">${payload.postings_used} of ${payload.postings_found} postings used. Sources — ${escapeHtml(sources)}</p>`
+        + industries + (titles ? `<ul class="genre-titles">${titles}</ul>` : "");
+    } catch (error) {
+      box.innerHTML = `<p class="results-message">Could not infer industry: ${escapeHtml(error.message)}</p>`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}

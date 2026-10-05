@@ -113,7 +113,10 @@ def heuristic_genre(jobs):
     matched = {genre: set() for genre in TAXONOMY}
     for job in jobs:
         title = (job.get("title") or "").lower()
-        body = f"{job.get('title', '')} {job.get('description', '')}".lower()
+        body = " ".join(
+            str(job.get(key) or "")
+            for key in ("title", "description", "company_industry", "skills")
+        ).lower()
         for genre, keywords in TAXONOMY.items():
             for keyword in keywords:
                 if keyword in title:
@@ -132,6 +135,9 @@ def heuristic_genre(jobs):
         "confidence": confidence,
         "score": scores[best],
         "matched_keywords": sorted(matched[best]),
+        "observed_industries": sorted(
+            {job.get("company_industry") for job in jobs if job.get("company_industry")}
+        ),
     }
 
 
@@ -182,6 +188,7 @@ def infer_genre(jobs, llm_threshold=LLM_THRESHOLD):
             "confidence": heuristic["confidence"],
             "method": "heuristics",
             "matched_keywords": heuristic["matched_keywords"],
+            "observed_industries": heuristic.get("observed_industries", []),
         }
     llm = llm_genre(jobs)
     if llm and llm.get("genre"):
@@ -197,5 +204,6 @@ def infer_genre(jobs, llm_threshold=LLM_THRESHOLD):
             "confidence": heuristic["confidence"],
             "method": "heuristics",
             "matched_keywords": heuristic["matched_keywords"],
+            "observed_industries": heuristic.get("observed_industries", []),
         }
     return {"genre": None, "confidence": 0.0, "method": "none"}

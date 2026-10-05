@@ -9,15 +9,20 @@ normalised job dicts::
 Sources are chosen by the ``JOB_SOURCES`` environment variable (comma
 separated names) and by whether their credentials are present:
 
-    linkedin   no key; scrapes LinkedIn's public guest endpoint.  Rate limited
-               and carries a terms-of-service risk - see ``limits()``.
+    ats        no key; reads employers' own Greenhouse/Lever/Ashby boards.
+               Keyless and ToS-safe, but needs the company slug.
+    linkedin   no key; scrapes LinkedIn's public guest endpoint.
+    jobspy     no key, but needs the ``python-jobspy`` package installed;
+               wraps LinkedIn/Indeed/Glassdoor/Google/Naukri.
     adzuna     needs ADZUNA_APP_ID + ADZUNA_APP_KEY (free tier).
     jooble     needs JOOBLE_API_KEY (free key on request).
     serpapi    needs SERPAPI_API_KEY; reads the Google Jobs panel.
 
-The module is dependency-free on purpose, matching app.py's stdlib-only style.
+The module stays dependency-free itself; only the optional JobSpy source needs
+a third-party package, and it is skipped cleanly when that is absent.
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -165,6 +170,208 @@ class LinkedInGuestSource(JobSource):
             if page < pages - 1:
                 time.sleep(self.min_interval)
         return jobs[:limit] if limit else jobs
+
+
+# --------------------------------------------------------------------------- #
+# JobSpy (optional multi-board scraper library: LinkedIn, Indeed, Glassdoor,
+# Google, ZipRecruiter, Naukri, Bayt, BDJobs)
+# --------------------------------------------------------------------------- #
+
+def jobspy_rows_to_jobs(records, limit=None):
+    """Map JobSpy output (a DataFrame or a list of dicts) to our job dicts."""
+    if hasattr(records, "to_dict"):  # pandas DataFrame
+        try:
+            rows = records.to_dict("records")
+        except TypeError:
+            rows = records.to_dict(orient="records")
+    else:
+        rows = list(records or [])
+
+    def value(row, key):
+        item = row.get(key)
+        if item is None:
+            return ""
+        if isinstance(item, float) and item != item:  # NaN
+            return ""
+        return str(item)
+
+    jobs = []
+    for row in rows:
+        site = value(row, "site")
+        jobs.append(
+            {
+                "title": value(row, "title"),
+                "company": value(row, "company"),
+                "location": value(row, "location"),
+                "description": value(row, "description"),
+                "url": value(row, "job_url_direct") or value(row, "job_url"),
+                "posted": value(row, "date_posted"),
+                "source": f"jobspy:{site}" if site else "jobspy",
+                "company_industry": value(row, "company_industry"),
+                "skills": value(row, "skills"),
+            }
+        )
+    return jobs[:limit] if limit else jobs
+
+
+class JobSpySource(JobSource):
+    name = "jobspy"
+    kind = "scrape"
+    risky = True
+
+    def __init__(self):
+        self.sites = [
+            s.strip() for s in os.environ.get(
+                "JOBSPY_SITES", "linkedin,indeed,glassdoor,google,naukri"
+            ).split(",") if s.strip()
+        ]
+        self.country = os.environ.get("JOBSPY_COUNTRY", "india").strip() or "india"
+
+    def configured(self):
+        return importlib.util.find_spec("jobspy") is not None
+
+    def limits(self):
+        return {
+            "kind": "scrape",
+            "boards": self.sites,
+            "country_indeed": self.country,
+            "requires": "pip install python-jobspy",
+            "note": (
+                "Wraps the same boards as direct scraping (LinkedIn/Indeed/"
+                "Glassdoor/Google/Naukri); the same terms-of-service caveats apply."
+            ),
+        }
+
+    def search(self, keyword, location, pages=1, limit=None):
+        from jobspy import scrape_jobs  # imported lazily so the module stays optional
+
+        wanted = limit or 40
+        frame = scrape_jobs(
+            site_name=self.sites,
+            search_term=keyword,
+            location=location or None,
+            results_wanted=wanted,
+            country_indeed=self.country,
+            fetch_description=False,
+            verbose=0,
+        )
+        return jobspy_rows_to_jobs(frame, limit)
+
+
+# --------------------------------------------------------------------------- #
+# ATS boards (keyless, ToS-safe: employers' own Greenhouse / Lever / Ashby)
+# --------------------------------------------------------------------------- #
+
+def candidate_slugs(name):
+    """Turn a company name into likely ATS board slugs."""
+    base = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+    if not base:
+        return []
+    compact = base.replace(" ", "")
+    hyphenated = base.replace(" ", "-")
+    return list(dict.fromkeys([compact, hyphenated]))
+
+
+def _fetch_ats(provider, slug):
+    """Fetch one employer's open roles from a keyless public ATS board."""
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    jobs = []
+    if provider == "greenhouse":
+        url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+        data = json.loads(_http("GET", url, headers=headers, timeout=12))
+        for item in data.get("jobs", []):
+            jobs.append({
+                "title": item.get("title", ""),
+                "company": item.get("company_name") or slug,
+                "location": (item.get("location") or {}).get("name", ""),
+                "description": item.get("content", "") or "",
+                "url": item.get("absolute_url", ""),
+                "posted": item.get("updated_at", "") or item.get("first_published", ""),
+                "source": "ats:greenhouse",
+            })
+    elif provider == "lever":
+        url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
+        data = json.loads(_http("GET", url, headers=headers, timeout=12))
+        for item in data:
+            categories = item.get("categories") or {}
+            jobs.append({
+                "title": item.get("text", ""),
+                "company": slug,
+                "location": categories.get("location", "") or "",
+                "description": item.get("descriptionPlain", "") or "",
+                "url": item.get("hostedUrl", ""),
+                "posted": item.get("createdAt", "") or "",
+                "source": "ats:lever",
+            })
+    elif provider == "ashby":
+        url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
+        data = json.loads(_http("GET", url, headers=headers, timeout=12))
+        for item in data.get("jobs", []):
+            jobs.append({
+                "title": item.get("title", ""),
+                "company": item.get("companyName") or slug,
+                "location": item.get("location", "") or "",
+                "description": item.get("descriptionPlain", "") or "",
+                "url": item.get("jobUrl", ""),
+                "posted": item.get("publishedAt", "") or "",
+                "source": "ats:ashby",
+            })
+    return jobs
+
+
+class ATSSource(JobSource):
+    name = "ats"
+    kind = "api"
+    risky = False
+
+    def __init__(self):
+        self.providers = [
+            p.strip().lower() for p in os.environ.get(
+                "ATS_PROVIDERS", "greenhouse,lever,ashby"
+            ).split(",") if p.strip()
+        ]
+
+    def configured(self):
+        return True  # keyless public boards
+
+    def limits(self):
+        return {
+            "kind": "api",
+            "providers": self.providers,
+            "note": (
+                "Keyless public ATS boards (employers' own careers pages). No key, "
+                "no scraping, no terms-of-service issue - the most legitimate source."
+            ),
+        }
+
+    def search(self, keyword, location, pages=1, limit=None):
+        slugs = candidate_slugs(keyword)
+        jobs = []
+        for provider in self.providers:
+            for slug in slugs:
+                try:
+                    jobs.extend(_fetch_ats(provider, slug))
+                except Exception:  # noqa: BLE001 - a miss just means no board here
+                    continue
+                if limit and len(jobs) >= limit:
+                    break
+            if limit and len(jobs) >= limit:
+                break
+        if location:
+            wanted = location.lower()
+            filtered = [
+                job for job in jobs
+                if not job.get("location") or wanted in job["location"].lower()
+            ]
+            jobs = filtered or jobs
+        seen, unique = set(), []
+        for job in jobs:
+            key = (job["title"].lower(), job["company"].lower(), job["url"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(job)
+        return unique[:limit] if limit else unique
 
 
 # --------------------------------------------------------------------------- #
@@ -327,7 +534,14 @@ class SerpApiSource(JobSource):
         return jobs[:limit] if limit else jobs
 
 
-ALL_SOURCE_CLASSES = [LinkedInGuestSource, AdzunaSource, JoobleSource, SerpApiSource]
+ALL_SOURCE_CLASSES = [
+    ATSSource,
+    LinkedInGuestSource,
+    JobSpySource,
+    AdzunaSource,
+    JoobleSource,
+    SerpApiSource,
+]
 
 
 def _registry():

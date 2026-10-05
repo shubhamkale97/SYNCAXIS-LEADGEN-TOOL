@@ -24,6 +24,9 @@ services:
       LINKEDIN_DELAY: ${LINKEDIN_DELAY:-3.5}
       LINKEDIN_PAGES: ${LINKEDIN_PAGES:-3}
       LINKEDIN_PROXY: ${LINKEDIN_PROXY:-}
+      JOBSPY_SITES: ${JOBSPY_SITES:-linkedin,indeed,glassdoor,google,naukri}
+      JOBSPY_COUNTRY: ${JOBSPY_COUNTRY:-india}
+      ATS_PROVIDERS: ${ATS_PROVIDERS:-greenhouse,lever,ashby}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}

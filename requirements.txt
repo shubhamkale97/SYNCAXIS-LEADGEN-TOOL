@@ -1,0 +1,3 @@
+# Optional: enables the "jobspy" source (multi-board scraper library).
+# The rest of the app is dependency-free and runs without this.
+python-jobspy

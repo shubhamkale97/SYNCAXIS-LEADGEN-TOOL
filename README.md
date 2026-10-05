@@ -56,7 +56,7 @@ advertised in a given city. It searches one or more job sources, then classifies
 the company from the roles' titles and descriptions - keyword heuristics first,
 with an optional LLM fallback for ambiguous cases.
 
-All four sources have a free tier, so the tool can run entirely on free options: LinkedIn's guest endpoint and SerpAPI need no payment (SerpAPI gives 250 searches/month free), and Adzuna and Jooble issue free keys.
+Every source has a free tier, so the tool can run entirely on free options: the ATS boards, LinkedIn's guest endpoint and SerpAPI need no payment (SerpAPI gives 250 searches/month free), and Adzuna and Jooble issue free keys.
 
 ### Sources
 
@@ -65,9 +65,11 @@ field. Credentials live in the environment:
 
 | Source | Needs | Notes |
 | --- | --- | --- |
+| `ats` | nothing | Keyless public Greenhouse/Lever/Ashby boards - no scraping, no ToS issue. Needs the company slug. |
 | `linkedin` | nothing | Scrapes LinkedIn's public guest endpoint. Rate limited and **against LinkedIn's User Agreement** - prefer an API source. |
 | `adzuna` | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` | Free tier; India via `ADZUNA_COUNTRY=in`. |
 | `jooble` | `JOOBLE_API_KEY` | Free key on request; 60+ countries. |
+| `jobspy` | `python-jobspy` package | Optional multi-board library: LinkedIn/Indeed/Glassdoor/Google/Naukri. Same ToS caveats as scraping. |
 | `serpapi` | `SERPAPI_API_KEY` | Google Jobs panel; aggregates LinkedIn/Indeed listings. |
 
 ### Endpoints
@@ -92,6 +94,20 @@ and SerpAPI allows 250 searches/month on the free plan.
 Set `LLM_API_KEY` (and optionally `LLM_BASE_URL`, `LLM_MODEL`) to enable an
 OpenAI-compatible classification call when the heuristic confidence is low.
 Without it, the heuristic answer is used.
+
+### UI
+
+The web app has a **Company industry** panel (company + city) that calls
+`/api/company-genre` and shows the inferred industry, confidence, method and the
+sample job titles behind it.
+
+### Building
+
+`requirements.txt` installs the optional `python-jobspy` dependency and the
+Dockerfile is now `python:3.12-slim` (JobSpy pulls pandas/numpy, which need a
+glibc base). Build without it via `docker compose build --build-arg INSTALL_JOBSPY=false`;
+the app still runs, minus the `jobspy` source.
+
 
 ## Credits
 

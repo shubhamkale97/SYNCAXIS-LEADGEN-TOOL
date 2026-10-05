@@ -12,6 +12,15 @@
   <link rel="stylesheet" href="/brand.css">
   <link rel="stylesheet" href="/coordinates.css">
   <link rel="stylesheet" href="/typography.css">
+  <style>
+    .genre-card{margin-top:28px}
+    .genre-heading{margin:.2rem 0 .4rem}
+    .genre-result{margin-top:18px;padding:16px 18px;border:1px solid rgba(255,255,255,.14);border-radius:14px}
+    .genre-result .genre-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+    .genre-result .genre-head strong{font-size:1.15rem}
+    .genre-titles{margin:10px 0 0;padding-left:18px}
+    .genre-titles li{margin:2px 0;opacity:.85}
+  </style>
 </head>
 <body>
   <div class="orb orb-one"></div><div class="orb orb-two"></div>
@@ -55,6 +64,26 @@
         <div class="col-12"><label class="check"><input id="email" type="checkbox"><span>Look for public emails <small>(slower)</small></span></label></div>
       </form>
       <p class="notice">Start with a small search. Repeated or high-volume collection may be rate-limited and may be restricted by Google’s terms.</p>
+    </section>
+
+    <section class="search-card genre-card">
+      <p class="eyebrow">COMPANY INDUSTRY</p>
+      <h2 class="genre-heading">What does a company actually do?</h2>
+      <p class="subhead">Infer a company's industry from the roles it advertises in a city.</p>
+      <form id="genreForm" class="row g-3 align-items-start">
+        <div class="field col-12 col-lg-5">
+          <label for="genreCompany">Company</label>
+          <div class="input-wrap"><input id="genreCompany" placeholder="e.g. Portescap" required></div>
+        </div>
+        <div class="field col-12 col-lg-5">
+          <label for="genreCity">City</label>
+          <div class="input-wrap"><input id="genreCity" placeholder="e.g. Pune" required></div>
+        </div>
+        <div class="search-submit col-12 col-lg-2">
+          <button id="genreButton" class="btn btn-primary w-100" type="submit"><span>Infer industry</span></button>
+        </div>
+      </form>
+      <div id="genreResult" class="genre-result hidden" aria-live="polite"></div>
     </section>
 
     <section id="progress" class="progress hidden" aria-live="polite">
