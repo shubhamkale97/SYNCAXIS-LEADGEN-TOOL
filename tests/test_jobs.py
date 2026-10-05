@@ -93,11 +93,45 @@ class SourceAdapterTests(unittest.TestCase):
             return LINKEDIN_HTML
 
         jobsources._http = fake_http
-        source = jobsources.LinkedInGuestSource()
-        jobs = source.search("engineer", "Pune", pages=2, limit=3)
+        original_engine = jobsources.LinkedInGuestSource._engine
+        jobsources.LinkedInGuestSource._engine = lambda self: "curl_cffi"
+        try:
+            source = jobsources.LinkedInGuestSource()
+            jobs = source.search("engineer", "Pune", pages=2, limit=3)
+        finally:
+            jobsources.LinkedInGuestSource._engine = original_engine
         self.assertEqual(len(jobs), 3)
         self.assertEqual(len(calls), 2)
         self.assertIn("start=25", calls[1])
+
+    def test_linkedin_falls_back_to_http_when_browser_fails(self):
+        os.environ["LINKEDIN_ENGINE"] = "playwright"
+        os.environ["LINKEDIN_DELAY"] = "0"
+        os.environ["LINKEDIN_PAGES"] = "1"
+        calls = {"browser": 0, "http": 0}
+        original_browser = jobsources._browser_fetch_many
+        original_engine = jobsources.LinkedInGuestSource._engine
+
+        def boom(*args, **kwargs):
+            calls["browser"] += 1
+            raise RuntimeError("browser down")
+
+        def fake_http(*args, **kwargs):
+            calls["http"] += 1
+            return LINKEDIN_HTML
+
+        jobsources._browser_fetch_many = boom
+        jobsources.LinkedInGuestSource._engine = lambda self: "playwright"
+        jobsources._http = fake_http
+        try:
+            jobs = jobsources.LinkedInGuestSource().search("engineer", "Pune", pages=1)
+        finally:
+            jobsources._browser_fetch_many = original_browser
+            jobsources.LinkedInGuestSource._engine = original_engine
+            os.environ["LINKEDIN_ENGINE"] = "auto"
+        self.assertEqual(calls["browser"], 1)
+        self.assertEqual(calls["http"], 1)
+        self.assertEqual(len(jobs), 2)
 
     def test_adzuna_parses_results(self):
         os.environ["ADZUNA_APP_ID"] = "id"
@@ -374,6 +408,56 @@ class ATSTests(unittest.TestCase):
         jobs = jobsources.ATSSource().search("Acme", "Pune")
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["title"], "SMT Engineer")
+
+
+class DedupeTests(unittest.TestCase):
+    def test_merges_same_posting_across_sources(self):
+        jobs = [
+            {"title": "Design Engineer", "company": "Portescap", "location": "Pune",
+             "description": "short", "url": "https://a", "source": "linkedin"},
+            {"title": "design engineer", "company": "Portescap ", "location": "",
+             "description": "a much longer description", "url": "https://b",
+             "posted": "2026-09-01", "source": "ats:greenhouse"},
+        ]
+        merged = jobsources.dedupe_jobs(jobs)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["sources"], ["linkedin", "ats:greenhouse"])
+        self.assertEqual(merged[0]["description"], "a much longer description")
+        self.assertEqual(merged[0]["url"], "https://a")
+        self.assertEqual(merged[0]["posted"], "2026-09-01")
+        self.assertEqual(merged[0]["location"], "Pune")
+
+    def test_keeps_distinct_postings(self):
+        jobs = [
+            {"title": "A", "company": "X", "source": "linkedin"},
+            {"title": "B", "company": "X", "source": "linkedin"},
+        ]
+        self.assertEqual(len(jobsources.dedupe_jobs(jobs)), 2)
+
+    def test_falls_back_to_url_when_no_title_company(self):
+        jobs = [
+            {"title": "", "company": "", "url": "https://same", "source": "a"},
+            {"title": "", "company": "", "url": "https://same", "source": "b"},
+        ]
+        self.assertEqual(len(jobsources.dedupe_jobs(jobs)), 1)
+
+    def test_search_jobs_reports_dedupe_summary(self):
+        class Fake(jobsources.JobSource):
+            name = "fake"
+
+            def search(self, *args, **kwargs):
+                return [{"title": "T", "company": "C", "source": "fake"}]
+
+        original = jobsources.selected_sources
+        jobsources.selected_sources = lambda names=None: [Fake(), Fake()]
+        try:
+            jobs, report = jobsources.search_jobs("x", "Pune")
+        finally:
+            jobsources.selected_sources = original
+        summary = next(entry["summary"] for entry in report if "summary" in entry)
+        self.assertEqual(summary["raw_total"], 2)
+        self.assertEqual(summary["unique"], 1)
+        self.assertEqual(summary["merged"], 1)
 
 
 if __name__ == "__main__":

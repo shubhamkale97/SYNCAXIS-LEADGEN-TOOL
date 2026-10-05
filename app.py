@@ -169,20 +169,34 @@ class Handler(SimpleHTTPRequestHandler):
             if not keyword:
                 return self.json_response(400, {"error": "keyword is required"})
             jobs, report = search_jobs(keyword, city, pages=pages, limit_per_source=max_jobs, sources=sources)
+            summary = next((entry["summary"] for entry in report if "summary" in entry), {})
             return self.json_response(200, {
                 "keyword": keyword, "city": city, "count": len(jobs),
+                "unique": summary.get("unique", len(jobs)),
+                "raw_total": summary.get("raw_total", len(jobs)),
+                "duplicates_merged": summary.get("merged", 0),
                 "sources": report, "jobs": jobs,
             })
         if not company:
             return self.json_response(400, {"error": "company is required"})
         jobs, report = search_jobs(company, city, pages=pages, limit_per_source=max_jobs, sources=sources)
+        summary = next((entry["summary"] for entry in report if "summary" in entry), {})
         matched = [job for job in jobs if company.lower() in (job.get("company") or "").lower()]
-        corpus = matched or jobs
-        genre = infer_genre(corpus) if corpus else {"genre": None, "confidence": 0.0, "method": "none"}
+        corpus = matched
+        if corpus:
+            genre = infer_genre(corpus)
+        else:
+            genre = {
+                "genre": None, "confidence": 0.0, "method": "none",
+                "reason": "no postings found for this company in this city",
+            }
         return self.json_response(200, {
             "company": company, "city": city, "genre": genre,
-            "postings_found": len(jobs), "postings_used": len(corpus),
-            "company_matched": len(matched), "sources": report,
+            "postings_found": summary.get("raw_total", len(jobs)),
+            "postings_unique": len(jobs),
+            "duplicates_merged": summary.get("merged", 0),
+            "postings_used": len(corpus), "company_matched": len(matched),
+            "sources": report,
             "sample_titles": [job.get("title", "") for job in corpus[:20]],
             "sample_jobs": corpus[:10],
         })

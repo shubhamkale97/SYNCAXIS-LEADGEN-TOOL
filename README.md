@@ -101,17 +101,30 @@ The web app has a **Company industry** panel (company + city) that calls
 `/api/company-genre` and shows the inferred industry, confidence, method and the
 sample job titles behind it.
 
+### De-duplication
+
+`search_jobs` merges the same posting seen on more than one source into a single
+combined record: the longest description wins, the other fields fill in from
+whichever source had them, and every source is listed under `sources`. The API
+reports `postings_found` (raw), `postings_unique`, and `duplicates_merged`.
+
 ### Building
 
-`requirements.txt` (installed always) adds the runtime packages that make the
-scrapers robust: `curl_cffi` for browser TLS/JA3 impersonation on the LinkedIn
-guest endpoint, `tenacity` for retry-with-backoff on 429/5xx, and
-`beautifulsoup4` + `lxml` for HTML parsing. `requirements-optional.txt` adds
-`python-jobspy`. The base image is `python:3.12-slim` (JobSpy pulls pandas/numpy,
-which need a glibc base); build without it via
-`docker compose build --build-arg INSTALL_JOBSPY=false` and the app still runs,
-minus the `jobspy` source. Every package is optional in code - `jobsources.py`
-degrades to the standard library if one is missing.
+Three requirement files, all optional in code:
+
+- `requirements.txt` (always installed) - the robustness layer: `curl_cffi`
+  (browser TLS/JA3 impersonation), `tenacity` (retry with backoff on 429/5xx),
+  and `beautifulsoup4` + `lxml` (HTML parsing).
+- `requirements-heavy.txt` - `playwright`, the heaviest tier: headless Chromium
+  that renders the LinkedIn guest endpoint in a real browser. The image also
+  runs `playwright install --with-deps chromium`. Skip it with
+  `--build-arg INSTALL_PLAYWRIGHT=false` to fall back to curl_cffi.
+- `requirements-optional.txt` - `python-jobspy` (pulls pandas/numpy). Skip it
+  with `--build-arg INSTALL_JOBSPY=false`.
+
+The base image is `python:3.12-slim` (native wheels need glibc, not alpine).
+Every package is optional in code: `jobsources.py` degrades to the standard
+library if one is missing, so the app runs regardless.
 
 
 ## Credits

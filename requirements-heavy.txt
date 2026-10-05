@@ -1,0 +1,5 @@
+# Heaviest tier: headless Chromium via Playwright, used to render the LinkedIn
+# guest endpoint in a real browser. Large (~1 GB image); the Dockerfile also
+# runs `playwright install --with-deps chromium`. Skip with
+# `--build-arg INSTALL_PLAYWRIGHT=false` to fall back to curl_cffi.
+playwright

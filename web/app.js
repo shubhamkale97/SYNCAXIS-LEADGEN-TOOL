@@ -157,12 +157,13 @@ if (genreForm) {
       const g = payload.genre || {};
       const conf = g.confidence != null ? ` · ${Math.round(g.confidence * 100)}% confidence` : "";
       const titles = (payload.sample_titles || []).slice(0, 6).map((t) => `<li>${escapeHtml(t)}</li>`).join("");
-      const sources = (payload.sources || []).map((s) => (s.error ? `${s.source}: unavailable` : `${s.source}: ${s.count}`)).join(" · ");
+      const sources = (payload.sources || []).filter((s) => s.source).map((s) => (s.error ? `${s.source}: unavailable` : `${s.source}: ${s.count}`)).join(" · ");
       const industries = (g.observed_industries || []).length
         ? `<p class="results-message">Reported industries: ${escapeHtml(g.observed_industries.join(", "))}</p>` : "";
       box.innerHTML = `<div class="genre-head"><strong>${escapeHtml(g.genre || "No clear industry found")}</strong>`
         + `<span class="source-pill">${escapeHtml(g.method || "n/a")}${escapeHtml(conf)}</span></div>`
-        + `<p class="results-message">${payload.postings_used} of ${payload.postings_found} postings used. Sources — ${escapeHtml(sources)}</p>`
+        + `<p class="results-message">${payload.postings_used} of ${payload.postings_unique ?? payload.postings_found} unique postings used`
+        + `${payload.duplicates_merged ? ` (${payload.duplicates_merged} duplicates merged)` : ""}. Sources — ${escapeHtml(sources)}</p>`
         + industries + (titles ? `<ul class="genre-titles">${titles}</ul>` : "");
     } catch (error) {
       box.innerHTML = `<p class="results-message">Could not infer industry: ${escapeHtml(error.message)}</p>`;

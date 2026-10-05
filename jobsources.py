@@ -19,12 +19,15 @@ separated names) and by whether their credentials are present:
 Runtime packages are used when present and skipped cleanly when absent, so the
 module still runs on a bare interpreter:
 
-    curl_cffi        browser TLS/JA3 impersonation, so the LinkedIn guest
-                     endpoint sees a real Chrome fingerprint instead of a
-                     scripted HTTP client.
+    playwright       headless Chromium (heaviest tier): renders the LinkedIn
+                     guest endpoint in a real browser.
+    curl_cffi        browser TLS/JA3 impersonation (lighter fallback).
     tenacity         retry with exponential backoff + jitter on 429/5xx.
     beautifulsoup4   robust HTML parsing (with lxml) for LinkedIn cards,
     lxml             falling back to a regex parser if bs4 is missing.
+
+``search_jobs`` merges duplicate postings found on more than one source into a
+single combined record (see ``dedupe_jobs``).
 """
 
 import importlib.util
@@ -88,6 +91,11 @@ except Exception:  # noqa: BLE001
     def _retry(fn):
         return fn
 
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:  # noqa: BLE001
+    sync_playwright = None
+
 
 @_retry
 def _http(method, url, *, headers=None, data=None, timeout=DEFAULT_TIMEOUT,
@@ -120,6 +128,76 @@ def _http(method, url, *, headers=None, data=None, timeout=DEFAULT_TIMEOUT,
 
 def _clean(text):
     return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", text or ""))).strip()
+
+
+def _env_proxy():
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return ""
+
+
+def _playwright_proxy(proxy):
+    """Convert a proxy string into Playwright's proxy dict."""
+    if not proxy:
+        return None
+    value = proxy.split("://", 1)[1] if "://" in proxy else proxy
+    if "@" in value:
+        creds, host_port = value.rsplit("@", 1)
+        username, _, password = creds.partition(":")
+        return {
+            "server": host_port if "://" in host_port else f"http://{host_port}",
+            "username": username,
+            "password": password,
+        }
+    return {"server": value if "://" in value else f"http://{value}"}
+
+
+def _browser_fetch_many(urls, *, timeout_ms=None, wait_selector=None, proxy=None):
+    """Fetch pages with headless Chromium (Playwright), reusing one browser.
+
+    Returns one HTML string per URL; a failure yields an empty string so the
+    caller can carry on with the remaining pages.
+    """
+    if sync_playwright is None:
+        raise RuntimeError("playwright is not installed")
+    timeout_ms = timeout_ms or int(os.environ.get("BROWSER_TIMEOUT_MS", "30000"))
+    launch_kwargs = {
+        "headless": os.environ.get("BROWSER_HEADLESS", "true").lower() != "false",
+        "args": [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    }
+    proxy_config = _playwright_proxy(proxy or _env_proxy())
+    if proxy_config:
+        launch_kwargs["proxy"] = proxy_config
+    results = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(**launch_kwargs)
+        context = browser.new_context(
+            user_agent=_CHROME_UA, locale="en-US",
+            viewport={"width": 1366, "height": 900},
+        )
+        for url in urls:
+            page = context.new_page()
+            try:
+                page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                if wait_selector:
+                    try:
+                        page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                    except Exception:  # noqa: BLE001 - selector may never appear
+                        pass
+                results.append(page.content())
+            except Exception:  # noqa: BLE001
+                results.append("")
+            finally:
+                page.close()
+        context.close()
+        browser.close()
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -231,10 +309,21 @@ class LinkedInGuestSource(JobSource):
         self.min_interval = float(os.environ.get("LINKEDIN_DELAY", "3.5"))
         self.max_pages = max(1, int(os.environ.get("LINKEDIN_PAGES", "3")))
         self.proxy = os.environ.get("LINKEDIN_PROXY", "").strip()
+        # auto -> playwright if installed, else curl_cffi.
+        self.engine = os.environ.get("LINKEDIN_ENGINE", "auto").strip().lower()
+
+    def _engine(self):
+        if self.engine in ("playwright", "browser"):
+            return "playwright" if sync_playwright is not None else "curl_cffi"
+        if self.engine in ("curl_cffi", "curl", "http"):
+            return "curl_cffi"
+        return "playwright" if sync_playwright is not None else "curl_cffi"
 
     def limits(self):
         return {
             "kind": "scrape",
+            "engine": self._engine(),
+            "playwright_available": sync_playwright is not None,
             "results_per_query_cap": 1000,
             "page_size": 25,
             "max_pages_per_query": 40,
@@ -250,8 +339,19 @@ class LinkedInGuestSource(JobSource):
             ),
         }
 
-    def search(self, keyword, location, pages=1, limit=None):
-        pages = max(1, min(int(pages), self.max_pages))
+    def _search_browser(self, urls, limit):
+        jobs = []
+        htmls = _browser_fetch_many(urls, wait_selector="li", proxy=self.proxy or None)
+        for html in htmls:
+            page_jobs = parse_linkedin_cards(html) if html else []
+            if not page_jobs:
+                break
+            jobs.extend(page_jobs)
+            if limit and len(jobs) >= limit:
+                break
+        return jobs
+
+    def _search_http(self, urls, limit):
         headers = {
             "User-Agent": _CHROME_UA,
             "Accept": "text/html,application/xhtml+xml",
@@ -259,28 +359,39 @@ class LinkedInGuestSource(JobSource):
             "Referer": "https://www.linkedin.com/jobs/search/",
         }
         jobs = []
-        for page in range(pages):
-            params = urllib.parse.urlencode(
-                {"keywords": keyword, "location": location, "start": page * self.page_size}
-            )
-            html = _http(
-                "GET", f"{self.endpoint}?{params}",
-                headers=headers, proxy=self.proxy, impersonate=True,
-            )
+        for index, url in enumerate(urls):
+            html = _http("GET", url, headers=headers, proxy=self.proxy, impersonate=True)
             page_jobs = parse_linkedin_cards(html)
             if not page_jobs:
                 break
             jobs.extend(page_jobs)
             if limit and len(jobs) >= limit:
                 break
-            if page < pages - 1:
+            if index < len(urls) - 1:
                 time.sleep(self.min_interval)
+        return jobs
+
+    def search(self, keyword, location, pages=1, limit=None):
+        pages = max(1, min(int(pages), self.max_pages))
+        urls = [
+            f"{self.endpoint}?" + urllib.parse.urlencode(
+                {"keywords": keyword, "location": location, "start": page * self.page_size}
+            )
+            for page in range(pages)
+        ]
+        if self._engine() == "playwright":
+            try:
+                jobs = self._search_browser(urls, limit)
+                if jobs:
+                    return jobs[:limit] if limit else jobs
+            except Exception:  # noqa: BLE001 - browser unavailable; fall back to HTTP
+                pass
+        jobs = self._search_http(urls, limit)
         return jobs[:limit] if limit else jobs
 
 
 # --------------------------------------------------------------------------- #
-# JobSpy (optional multi-board scraper library: LinkedIn, Indeed, Glassdoor,
-# Google, ZipRecruiter, Naukri, Bayt, BDJobs)
+# JobSpy (optional multi-board scraper library)
 # --------------------------------------------------------------------------- #
 
 def jobspy_rows_to_jobs(records, limit=None):
@@ -650,6 +761,46 @@ ALL_SOURCE_CLASSES = [
 ]
 
 
+# --------------------------------------------------------------------------- #
+# De-duplication: merge the same posting seen on more than one source
+# --------------------------------------------------------------------------- #
+
+def _norm(text):
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def dedupe_jobs(jobs):
+    """Merge duplicate postings across sources into one combined record.
+
+    Two postings are treated as the same job when their normalised title and
+    company match (falling back to the URL when both are empty). A merged
+    record keeps the longest description, the first non-empty value for the
+    other fields, and lists every source it was seen on under ``sources``.
+    """
+    merged = {}
+    order = []
+    for job in jobs:
+        key = (_norm(job.get("title")), _norm(job.get("company")))
+        if key == ("", ""):
+            key = ("url", job.get("url", ""))
+        if key not in merged:
+            record = dict(job)
+            record["sources"] = [job["source"]] if job.get("source") else []
+            merged[key] = record
+            order.append(key)
+            continue
+        record = merged[key]
+        source = job.get("source")
+        if source and source not in record["sources"]:
+            record["sources"].append(source)
+        if len(job.get("description") or "") > len(record.get("description") or ""):
+            record["description"] = job["description"]
+        for field in ("location", "url", "posted", "company_industry", "skills"):
+            if not record.get(field) and job.get(field):
+                record[field] = job[field]
+    return [merged[key] for key in order]
+
+
 def _registry():
     return {cls.name: cls for cls in ALL_SOURCE_CLASSES}
 
@@ -693,9 +844,11 @@ def selected_sources(names=None):
 def search_jobs(keyword, location, pages=1, limit_per_source=40, sources=None):
     """Search every selected source and return (jobs, per_source_report).
 
-    A failing source is reported but never aborts the others.
+    Results from all sources are merged and de-duplicated, so a posting that
+    appears on more than one board is returned once with a combined record. A
+    failing source is reported but never aborts the others.
     """
-    jobs = []
+    raw = []
     report = []
     for source in selected_sources(sources):
         try:
@@ -703,6 +856,16 @@ def search_jobs(keyword, location, pages=1, limit_per_source=40, sources=None):
         except Exception as error:  # noqa: BLE001 - surface any source failure
             report.append({"source": source.name, "error": f"{type(error).__name__}: {error}"})
             continue
-        jobs.extend(found)
+        raw.extend(found)
         report.append({"source": source.name, "count": len(found), "risky": source.risky})
+    jobs = dedupe_jobs(raw)
+    report.append(
+        {
+            "summary": {
+                "raw_total": len(raw),
+                "unique": len(jobs),
+                "merged": len(raw) - len(jobs),
+            }
+        }
+    )
     return jobs, report
