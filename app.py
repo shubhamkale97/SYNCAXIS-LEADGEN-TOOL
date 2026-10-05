@@ -10,6 +10,8 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from network_year import current_year
+from genre import infer_genre
+from jobsources import available_sources, search_jobs
 
 ROOT = Path(__file__).parent / "web"
 SCRAPER_URL = os.environ.get("SCRAPER_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -105,9 +107,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self.proxy("GET", f"/api/v1/jobs/{suffix}")
         if parsed.path == "/api/jobs":
             return self.proxy("GET", "/api/v1/jobs")
+        if parsed.path == "/api/job-sources":
+            return self.json_response(200, {"sources": available_sources()})
         return super().do_GET()
 
     def do_POST(self):
+        if self.path in {"/api/company-genre", "/api/job-search"}:
+            return self.jobs_endpoint()
         if self.path not in {"/api/jobs", "/api/alternative-search"}:
             return self.json_response(404, {"error": "Not found"})
         try:
@@ -138,6 +144,48 @@ class Handler(SimpleHTTPRequestHandler):
             "fast_mode": False, "max_time": 600,
         }
         return self.proxy("POST", "/api/v1/jobs", payload)
+
+    def jobs_endpoint(self):
+        """Search job postings and infer a company's industry from them."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            incoming = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError) as error:
+            return self.json_response(400, {"error": str(error)})
+        company = str(incoming.get("company", "")).strip()[:120]
+        keyword = str(incoming.get("keyword", "")).strip()[:120]
+        city = str(incoming.get("city", "") or incoming.get("location", "")).strip()[:120]
+        sources = incoming.get("sources")
+        if sources is not None and not isinstance(sources, list):
+            return self.json_response(400, {"error": "sources must be a list of source names"})
+        try:
+            pages = max(1, min(int(incoming.get("pages", 2)), 5))
+            max_jobs = max(5, min(int(incoming.get("max_jobs", 40)), 200))
+        except (ValueError, TypeError):
+            return self.json_response(400, {"error": "pages and max_jobs must be integers"})
+        if not city:
+            return self.json_response(400, {"error": "city (or location) is required"})
+        if self.path == "/api/job-search":
+            if not keyword:
+                return self.json_response(400, {"error": "keyword is required"})
+            jobs, report = search_jobs(keyword, city, pages=pages, limit_per_source=max_jobs, sources=sources)
+            return self.json_response(200, {
+                "keyword": keyword, "city": city, "count": len(jobs),
+                "sources": report, "jobs": jobs,
+            })
+        if not company:
+            return self.json_response(400, {"error": "company is required"})
+        jobs, report = search_jobs(company, city, pages=pages, limit_per_source=max_jobs, sources=sources)
+        matched = [job for job in jobs if company.lower() in (job.get("company") or "").lower()]
+        corpus = matched or jobs
+        genre = infer_genre(corpus) if corpus else {"genre": None, "confidence": 0.0, "method": "none"}
+        return self.json_response(200, {
+            "company": company, "city": city, "genre": genre,
+            "postings_found": len(jobs), "postings_used": len(corpus),
+            "company_matched": len(matched), "sources": report,
+            "sample_titles": [job.get("title", "") for job in corpus[:20]],
+            "sample_jobs": corpus[:10],
+        })
 
     def alternative_search(self, keyword, latitude, longitude, radius_km):
         """Keyless background search using OpenStreetMap's Overpass API."""

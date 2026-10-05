@@ -49,6 +49,48 @@ Business results use a scraper rather than Google's official Places API and can 
 
 The app itself is bound to `127.0.0.1` by default. `HOST_BIND` can expose it to a trusted LAN. Add authentication and TLS before exposing it to the public Internet.
 
+## Company industry from job postings
+
+The tool can infer a company's industry (genre) from the job postings it has
+advertised in a given city. It searches one or more job sources, then classifies
+the company from the roles' titles and descriptions - keyword heuristics first,
+with an optional LLM fallback for ambiguous cases.
+
+### Sources
+
+Selected by `JOB_SOURCES` (comma separated) or per request via the `sources`
+field. Credentials live in the environment:
+
+| Source | Needs | Notes |
+| --- | --- | --- |
+| `linkedin` | nothing | Scrapes LinkedIn's public guest endpoint. Rate limited and **against LinkedIn's User Agreement** - prefer an API source. |
+| `adzuna` | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` | Free tier; India via `ADZUNA_COUNTRY=in`. |
+| `jooble` | `JOOBLE_API_KEY` | Free key on request; 60+ countries. |
+| `serpapi` | `SERPAPI_API_KEY` | Google Jobs panel; aggregates LinkedIn/Indeed listings. |
+
+### Endpoints
+
+- `GET /api/job-sources` - which sources are configured, with their limits.
+- `POST /api/job-search` - raw search: `{"keyword": "design engineer", "city": "Pune", "pages": 2, "sources": ["adzuna"]}`.
+- `POST /api/company-genre` - `{"company": "Portescap", "city": "Pune"}` returns the inferred genre, confidence, the method used, and the sample titles behind it.
+
+### How much the bot can pull per city
+
+LinkedIn's guest endpoint returns ~25 results per page and caps a single
+keyword+city query at ~1,000 results (40 pages). Pace it: keep to 2-5s jittered
+delays and under 10-12 pages/minute, or you will start seeing HTTP 429s. On one
+residential IP, practitioners keep to ~20-30 requests/day (or ~500/hour with a
+rotating proxy pool), so a full 1,000-result city window should be spread out or
+split by posted-date/seniority/function. The API sources replace this ban risk
+with a quota: Adzuna allows 25 calls/min and 250/day, Jooble sets per-key limits,
+and SerpAPI allows 250 searches/month on the free plan.
+
+### LLM fallback (optional)
+
+Set `LLM_API_KEY` (and optionally `LLM_BASE_URL`, `LLM_MODEL`) to enable an
+OpenAI-compatible classification call when the heuristic confidence is low.
+Without it, the heuristic answer is used.
+
 ## Credits
 
 Inspired by the MIT-licensed [Google Maps Scraper Kit](https://github.com/Mahanaicoach/google-maps-scraper-kit). The underlying scraper is by Georgios Komninos and is also MIT-licensed.
