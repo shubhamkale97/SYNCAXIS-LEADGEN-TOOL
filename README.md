@@ -98,9 +98,24 @@ Without it, the heuristic answer is used.
 
 ### UI
 
-The web app has a **Company industry** panel (company + city) that calls
-`/api/company-genre` and shows the inferred industry, confidence, method and the
-sample job titles behind it.
+The web app has a **Field check** panel (company + field + city) that calls
+`/api/company-match` and shows a yes/no verdict on whether the company is in
+that field, with the matching job titles behind it.
+
+### Map view
+
+A Leaflet map (vendored locally under `web/vendor/`) shows the whole search
+visually:
+
+- the **selected location** as a marker, with the **search radius** drawn as a
+  circle that follows the radius slider;
+- every collected lead as a **numbered marker** - the number matches the `#`
+  column in the results table, so a row and its pin are easy to pair up;
+- the **shortlisted company** (when `/api/company-match` returns a match) as a
+  separate numbered marker, geocoded from the posting's location.
+
+Tiles come from OpenStreetMap, so the map needs outbound internet at runtime -
+the same requirement as geocoding.
 
 ### Field check
 

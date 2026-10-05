@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/vendor/bootstrap.min.css">
+  <link rel="stylesheet" href="/vendor/leaflet.css">
   <link rel="stylesheet" href="/brand.css">
   <link rel="stylesheet" href="/coordinates.css">
   <link rel="stylesheet" href="/typography.css">
@@ -23,6 +24,15 @@
     .verdict.yes{color:#3ddc84}
     .verdict.no{color:#ff6b6b}
     .verdict.unknown{color:#f0c674}
+    .map-card{margin-top:28px}
+    .map-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+    .map-hint{opacity:.7;font-size:.85rem}
+    .map-canvas{height:380px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.14)}
+    .map-pin{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;font-size:12px;font-weight:600;color:#08120c;background:#3ddc84;border:2px solid #0b1a12;box-sizing:border-box}
+    .map-pin.lead{background:#8ecbff;color:#06121d}
+    .map-pin.company{background:#ffd166;color:#231a02}
+    .map-pin.area{background:#ffffff;color:#0b1a12}
+    .lead-no{font-variant-numeric:tabular-nums;opacity:.75}
   </style>
 </head>
 <body>
@@ -67,6 +77,11 @@
         <div class="col-12"><label class="check"><input id="email" type="checkbox"><span>Look for public emails <small>(slower)</small></span></label></div>
       </form>
       <p class="notice">Start with a small search. Repeated or high-volume collection may be rate-limited and may be restricted by Google’s terms.</p>
+    </section>
+
+    <section class="map-card">
+      <div class="map-head"><p class="eyebrow">SEARCH AREA</p><span id="mapHint" class="map-hint">Set a location to see it here</span></div>
+      <div id="map" class="map-canvas" role="img" aria-label="Map of the selected search area and leads"></div>
     </section>
 
     <section class="search-card genre-card">
@@ -117,7 +132,7 @@
         <button id="clearButton" class="text-button danger" type="button" disabled>Clear list</button>
       </div>
       <div class="table-wrap table-responsive" tabindex="0" role="region" aria-label="Lead directory, scroll horizontally to view all columns">
-        <table><thead><tr><th>Business</th><th>Category</th><th>Contact</th><th>Rating</th><th>Address</th><th>Search</th></tr></thead><tbody id="resultRows"></tbody></table>
+        <table><thead><tr><th>#</th><th>Business</th><th>Category</th><th>Contact</th><th>Rating</th><th>Address</th><th>Search</th></tr></thead><tbody id="resultRows"></tbody></table>
       </div>
       <div id="emptyFilter" class="empty">No leads yet. Run your first search above and results will appear here.</div>
     </section>
@@ -128,6 +143,7 @@
   </footer>
   <div id="toast" class="toast hidden" role="alert"></div>
   <script src="/vendor/bootstrap.bundle.min.js" defer></script>
+  <script src="/vendor/leaflet.js" defer></script>
   <script src="/app.js" defer></script>
   <script src="/branding.js" defer></script>
 </body>
