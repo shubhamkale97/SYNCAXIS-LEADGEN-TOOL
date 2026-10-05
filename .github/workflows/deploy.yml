@@ -1,0 +1,67 @@
+name: Build and deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Deploy on the server (needs a self-hosted runner labelled "syncaxis")'
+        type: boolean
+        default: false
+
+env:
+  IMAGE: ghcr.io/shubhamkale97/syncaxis-leadgen-tool
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build and publish the image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy on the server
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    runs-on: [self-hosted, syncaxis]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inject HERE_API_KEY into .env (from the repository secret)
+        shell: pwsh
+        env:
+          HERE_API_KEY: ${{ secrets.HERE_API_KEY }}
+        run: |
+          $file = ".env"
+          $lines = @()
+          if (Test-Path $file) {
+            $lines = Get-Content $file | Where-Object { $_ -notmatch '^\s*(HERE_API_KEY|MAP_PROVIDER)=' }
+          }
+          $lines += "HERE_API_KEY=$env:HERE_API_KEY"
+          $lines += "MAP_PROVIDER=here"
+          $lines | Set-Content -Encoding ascii $file
+          Write-Host "Wrote .env with HERE_API_KEY from the repository secret."
+      - name: Rebuild and start the stack
+        shell: pwsh
+        run: docker compose up -d --build

@@ -177,6 +177,22 @@ The base image is `python:3.12-slim` (native wheels need glibc, not alpine).
 Every package is optional in code: `jobsources.py` degrades to the standard
 library if one is missing, so the app runs regardless.
 
+### Deploying from GitHub Actions
+
+`.github/workflows/deploy.yml` builds the image on every push to `main` and
+publishes it to GHCR. It also has a manual **deploy** job that runs on a
+self-hosted runner and injects the map key from a repository secret:
+
+1. Repo -> Settings -> Secrets and variables -> Actions -> add `HERE_API_KEY`.
+2. Register a self-hosted runner on the server and give it the label `syncaxis`.
+3. Actions -> "Build and deploy" -> Run workflow -> tick **deploy**.
+
+The deploy job writes `HERE_API_KEY` into `.env` (which is gitignored) and runs
+`docker compose up -d --build`. The secret value is never written to a tracked
+file and never appears in the repository. Without a self-hosted runner the
+deploy job stays queued, so leave the **deploy** box unticked if you deploy by
+hand.
+
 
 ## Credits
 
