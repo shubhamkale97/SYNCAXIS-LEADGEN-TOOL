@@ -164,13 +164,15 @@ function loadGoogleMaps(key){
   });
 }
 
+window.gm_authFailure=()=>{const h=$("mapHint");if(h)h.textContent="Google Maps rejected the key - check referrer / billing";console.warn("gm_authFailure");};
 function pinIcon(label,kind){return L.divIcon({className:"map-pin-wrap",html:`<span class="map-pin ${kind}">${label}</span>`,iconSize:[26,26],iconAnchor:[13,13]});}
 
 function createLeafletView(el,cfg){
   const m=L.map(el).setView([20.5937,78.9629],5);
   const here=cfg.provider==="here"&&cfg.key;
-  const url=here?`https://maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png?size=512&style=explore.day&apiKey=${encodeURIComponent(cfg.key)}`:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-  L.tileLayer(url,{maxZoom:here?18:19,attribution:here?"(c) HERE":"(c) OpenStreetMap"}).addTo(m);
+  const url=here?`https://maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png?size=256&style=explore.day&apiKey=${encodeURIComponent(cfg.key)}`:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+  const tiles=L.tileLayer(url,{maxZoom:here?18:19,attribution:here?"(c) HERE":"(c) OpenStreetMap"}).addTo(m);
+  tiles.on("tileerror",(e)=>{const h=$("mapHint");if(h)h.textContent=(here?"HERE":"OSM")+" tiles failed - check the key/plan (see console)";console.warn("map tile error",cfg.provider,e&&e.tile&&e.tile.src);});
   const leadLayer=L.layerGroup().addTo(m),companyLayer=L.layerGroup().addTo(m);
   let areaMarker=null,areaCircle=null;
   setTimeout(()=>m.invalidateSize(),200);
