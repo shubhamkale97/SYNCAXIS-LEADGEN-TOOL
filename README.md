@@ -103,10 +103,15 @@ sample job titles behind it.
 
 ### Building
 
-`requirements.txt` installs the optional `python-jobspy` dependency and the
-Dockerfile is now `python:3.12-slim` (JobSpy pulls pandas/numpy, which need a
-glibc base). Build without it via `docker compose build --build-arg INSTALL_JOBSPY=false`;
-the app still runs, minus the `jobspy` source.
+`requirements.txt` (installed always) adds the runtime packages that make the
+scrapers robust: `curl_cffi` for browser TLS/JA3 impersonation on the LinkedIn
+guest endpoint, `tenacity` for retry-with-backoff on 429/5xx, and
+`beautifulsoup4` + `lxml` for HTML parsing. `requirements-optional.txt` adds
+`python-jobspy`. The base image is `python:3.12-slim` (JobSpy pulls pandas/numpy,
+which need a glibc base); build without it via
+`docker compose build --build-arg INSTALL_JOBSPY=false` and the app still runs,
+minus the `jobspy` source. Every package is optional in code - `jobsources.py`
+degrades to the standard library if one is missing.
 
 
 ## Credits

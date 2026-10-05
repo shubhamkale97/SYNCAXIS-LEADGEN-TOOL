@@ -10,16 +10,21 @@ Sources are chosen by the ``JOB_SOURCES`` environment variable (comma
 separated names) and by whether their credentials are present:
 
     ats        no key; reads employers' own Greenhouse/Lever/Ashby boards.
-               Keyless and ToS-safe, but needs the company slug.
     linkedin   no key; scrapes LinkedIn's public guest endpoint.
-    jobspy     no key, but needs the ``python-jobspy`` package installed;
-               wraps LinkedIn/Indeed/Glassdoor/Google/Naukri.
+    jobspy     no key, but needs the ``python-jobspy`` package installed.
     adzuna     needs ADZUNA_APP_ID + ADZUNA_APP_KEY (free tier).
     jooble     needs JOOBLE_API_KEY (free key on request).
     serpapi    needs SERPAPI_API_KEY; reads the Google Jobs panel.
 
-The module stays dependency-free itself; only the optional JobSpy source needs
-a third-party package, and it is skipped cleanly when that is absent.
+Runtime packages are used when present and skipped cleanly when absent, so the
+module still runs on a bare interpreter:
+
+    curl_cffi        browser TLS/JA3 impersonation, so the LinkedIn guest
+                     endpoint sees a real Chrome fingerprint instead of a
+                     scripted HTTP client.
+    tenacity         retry with exponential backoff + jitter on 429/5xx.
+    beautifulsoup4   robust HTML parsing (with lxml) for LinkedIn cards,
+    lxml             falling back to a regex parser if bs4 is missing.
 """
 
 import importlib.util
@@ -38,9 +43,72 @@ _CHROME_UA = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
+# --- optional runtime packages -------------------------------------------- #
+try:
+    from curl_cffi import requests as _curl_requests
+except Exception:  # noqa: BLE001
+    _curl_requests = None
 
-def _http(method, url, *, headers=None, data=None, timeout=DEFAULT_TIMEOUT, proxy=None):
-    """Minimal HTTP helper with optional per-request proxy support."""
+try:
+    from bs4 import BeautifulSoup
+
+    _BS4_PARSER = "lxml" if importlib.util.find_spec("lxml") else "html.parser"
+except Exception:  # noqa: BLE001
+    BeautifulSoup = None
+    _BS4_PARSER = None
+
+try:
+    from tenacity import (
+        retry,
+        retry_if_exception,
+        stop_after_attempt,
+        wait_exponential_jitter,
+    )
+
+    def _is_retryable(exc):
+        """Retry transient failures only: 429 and 5xx, plus connection errors."""
+        for attr in ("status_code", "code"):
+            status = getattr(exc, attr, None)
+            if isinstance(status, int):
+                return status == 429 or status >= 500
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(status, int):
+            return status == 429 or status >= 500
+        return True
+
+    def _retry(fn):
+        return retry(
+            stop=stop_after_attempt(int(os.environ.get("HTTP_ATTEMPTS", "3"))),
+            wait=wait_exponential_jitter(initial=1, max=8),
+            retry=retry_if_exception(_is_retryable),
+            reraise=True,
+        )(fn)
+
+except Exception:  # noqa: BLE001
+    def _retry(fn):
+        return fn
+
+
+@_retry
+def _http(method, url, *, headers=None, data=None, timeout=DEFAULT_TIMEOUT,
+          proxy=None, impersonate=False):
+    """HTTP request with optional browser impersonation, proxy and retries.
+
+    Uses curl_cffi (with real Chrome TLS/JA3 fingerprints) when available and
+    falls back to the standard library otherwise.
+    """
+    if _curl_requests is not None:
+        kwargs = {"headers": headers or {}, "timeout": timeout}
+        if data is not None:
+            kwargs["data"] = data
+        if proxy:
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+        if impersonate:
+            kwargs["impersonate"] = os.environ.get("IMPERSONATE_BROWSER", "chrome")
+        response = _curl_requests.request(method, url, **kwargs)
+        response.raise_for_status()
+        return response.text
+
     handlers = []
     if proxy:
         handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
@@ -58,13 +126,8 @@ def _clean(text):
 # LinkedIn public guest endpoint
 # --------------------------------------------------------------------------- #
 
-def parse_linkedin_cards(html):
-    """Parse the job cards returned by LinkedIn's guest search endpoint.
-
-    The markup is not an official contract, so this is defensive: any field it
-    cannot read is left blank rather than raising, and a parse miss simply
-    yields fewer jobs.
-    """
+def _parse_linkedin_cards_regex(html):
+    """Regex fallback parser for LinkedIn guest job cards."""
     jobs = []
     for block in re.findall(r"<li\b.*?</li>", html, flags=re.S | re.I):
         url_match = re.search(r'base-card__full-link[^>]*href="([^"]+)"', block, re.I)
@@ -93,6 +156,47 @@ def parse_linkedin_cards(html):
             }
         )
     return jobs
+
+
+def _parse_linkedin_cards_soup(html):
+    """BeautifulSoup parser for LinkedIn guest job cards."""
+    soup = BeautifulSoup(html, _BS4_PARSER)
+    jobs = []
+    for card in soup.select("li"):
+        title_el = card.select_one(".base-search-card__title")
+        if title_el is None:
+            continue
+        title = _clean(title_el.get_text())
+        if not title:
+            continue
+        company_el = card.select_one(".base-search-card__subtitle")
+        location_el = card.select_one(".job-search-card__location")
+        link_el = card.select_one("a.base-card__full-link")
+        date_el = card.select_one(".job-search-card__listdate")
+        jobs.append(
+            {
+                "title": title,
+                "company": _clean(company_el.get_text()) if company_el else "",
+                "location": _clean(location_el.get_text()) if location_el else "",
+                "description": "",
+                "url": link_el.get("href", "") if link_el else "",
+                "posted": _clean(date_el.get_text()) if date_el else "",
+                "source": "linkedin",
+            }
+        )
+    return jobs
+
+
+def parse_linkedin_cards(html):
+    """Parse LinkedIn guest job cards, preferring BeautifulSoup over regex."""
+    if BeautifulSoup is not None:
+        try:
+            jobs = _parse_linkedin_cards_soup(html)
+            if jobs:
+                return jobs
+        except Exception:  # noqa: BLE001 - fall back to regex
+            pass
+    return _parse_linkedin_cards_regex(html)
 
 
 class JobSource:
@@ -139,6 +243,7 @@ class LinkedInGuestSource(JobSource):
             "safe_requests_per_day_per_ip": (
                 "~20-30 conservative; ~500/hour with rotating residential proxies"
             ),
+            "tls_impersonation": _curl_requests is not None,
             "note": (
                 "Scraping LinkedIn's guest endpoint is against its User "
                 "Agreement and can get an IP blocked. Prefer an API source."
@@ -159,7 +264,8 @@ class LinkedInGuestSource(JobSource):
                 {"keywords": keyword, "location": location, "start": page * self.page_size}
             )
             html = _http(
-                "GET", f"{self.endpoint}?{params}", headers=headers, proxy=self.proxy
+                "GET", f"{self.endpoint}?{params}",
+                headers=headers, proxy=self.proxy, impersonate=True,
             )
             page_jobs = parse_linkedin_cards(html)
             if not page_jobs:

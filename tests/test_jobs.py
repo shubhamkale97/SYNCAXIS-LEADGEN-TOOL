@@ -60,6 +60,21 @@ class LinkedInParseTests(unittest.TestCase):
     def test_empty_html_is_safe(self):
         self.assertEqual(jobsources.parse_linkedin_cards("<html></html>"), [])
 
+    def test_regex_parser_directly(self):
+        jobs = jobsources._parse_linkedin_cards_regex(LINKEDIN_HTML)
+        self.assertEqual(
+            [job["title"] for job in jobs],
+            ["Design Engineer", "Servo Motor Winding Technician"],
+        )
+
+    @unittest.skipIf(jobsources.BeautifulSoup is None, "beautifulsoup4 not installed")
+    def test_soup_parser_directly(self):
+        jobs = jobsources._parse_linkedin_cards_soup(LINKEDIN_HTML)
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(jobs[0]["company"], "Portescap")
+        self.assertEqual(jobs[0]["location"], "Pune, Maharashtra, India")
+        self.assertIn("/jobs/view/3912345678", jobs[0]["url"])
+
 
 class SourceAdapterTests(unittest.TestCase):
     def setUp(self):

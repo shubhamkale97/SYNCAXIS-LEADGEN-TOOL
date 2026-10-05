@@ -1,3 +1,7 @@
-# Optional: enables the "jobspy" source (multi-board scraper library).
-# The rest of the app is dependency-free and runs without this.
-python-jobspy
+# Runtime packages that make the scrapers robust. All are optional in code
+# (jobsources.py degrades to the standard library), but installed here by
+# default.
+curl_cffi        # browser TLS/JA3 impersonation for the LinkedIn guest endpoint
+tenacity         # retry with exponential backoff + jitter on 429/5xx
+beautifulsoup4   # robust HTML parsing for LinkedIn job cards
+lxml             # fast parser backend for BeautifulSoup
