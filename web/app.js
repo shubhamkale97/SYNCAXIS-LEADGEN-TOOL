@@ -142,31 +142,31 @@ if (genreForm) {
     event.preventDefault();
     const button = $("genreButton");
     const company = $("genreCompany").value.trim();
+    const field = $("genreField").value.trim();
     const city = $("genreCity").value.trim();
-    if (!company || !city) return;
+    if (!company || !field || !city) return;
     button.disabled = true;
     const box = $("genreResult");
     box.classList.remove("hidden");
-    box.innerHTML = `<p class="results-message">Searching job postings for ${escapeHtml(company)} in ${escapeHtml(city)}…</p>`;
+    box.innerHTML = `<p class="results-message">Checking ${escapeHtml(company)} for "${escapeHtml(field)}" in ${escapeHtml(city)}…</p>`;
     try {
-      const payload = await request("/api/company-genre", {
+      const p = await request("/api/company-match", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ company, city }),
+        body: JSON.stringify({ company, keyword: field, city }),
       });
-      const g = payload.genre || {};
-      const conf = g.confidence != null ? ` · ${Math.round(g.confidence * 100)}% confidence` : "";
-      const titles = (payload.sample_titles || []).slice(0, 6).map((t) => `<li>${escapeHtml(t)}</li>`).join("");
-      const sources = (payload.sources || []).filter((s) => s.source).map((s) => (s.error ? `${s.source}: unavailable` : `${s.source}: ${s.count}`)).join(" · ");
-      const industries = (g.observed_industries || []).length
-        ? `<p class="results-message">Reported industries: ${escapeHtml(g.observed_industries.join(", "))}</p>` : "";
-      box.innerHTML = `<div class="genre-head"><strong>${escapeHtml(g.genre || "No clear industry found")}</strong>`
-        + `<span class="source-pill">${escapeHtml(g.method || "n/a")}${escapeHtml(conf)}</span></div>`
-        + `<p class="results-message">${payload.postings_used} of ${payload.postings_unique ?? payload.postings_found} unique postings used`
-        + `${payload.duplicates_merged ? ` (${payload.duplicates_merged} duplicates merged)` : ""}. Sources — ${escapeHtml(sources)}</p>`
-        + industries + (titles ? `<ul class="genre-titles">${titles}</ul>` : "");
+      const verdict = p.matches === true ? "Yes — in this field"
+        : p.matches === false ? "No — no evidence of this field" : "Unknown — no postings found";
+      const cls = p.matches === true ? "verdict yes" : p.matches === false ? "verdict no" : "verdict unknown";
+      const evidence = (p.evidence || []).slice(0, 6).map((e) =>
+        `<li>${escapeHtml(e.title)}${e.in_title ? " <small>(title match)</small>" : ""} — ${escapeHtml((e.matched_terms || []).join(", "))}</li>`).join("");
+      box.innerHTML = `<div class="genre-head"><strong class="${cls}">${escapeHtml(verdict)}</strong>`
+        + `<span class="source-pill">${p.confidence != null ? Math.round(p.confidence * 100) + "% confidence" : ""}</span></div>`
+        + `<p class="results-message">${p.matched_postings} of ${p.total_postings} of this company's postings match "${escapeHtml(field)}"`
+        + `${p.reason ? " · " + escapeHtml(p.reason) : ""}</p>`
+        + (evidence ? `<ul class="genre-titles">${evidence}</ul>` : "");
     } catch (error) {
-      box.innerHTML = `<p class="results-message">Could not infer industry: ${escapeHtml(error.message)}</p>`;
+      box.innerHTML = `<p class="results-message">Check failed: ${escapeHtml(error.message)}</p>`;
     } finally {
       button.disabled = false;
     }

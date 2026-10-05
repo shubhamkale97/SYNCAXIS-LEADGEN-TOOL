@@ -77,6 +77,7 @@ field. Credentials live in the environment:
 - `GET /api/job-sources` - which sources are configured, with their limits.
 - `POST /api/job-search` - raw search: `{"keyword": "design engineer", "city": "Pune", "pages": 2, "sources": ["adzuna"]}`.
 - `POST /api/company-genre` - `{"company": "Portescap", "city": "Pune"}` returns the inferred genre, confidence, the method used, and the sample titles behind it.
+- `POST /api/company-match` - `{"company": "Hinduja Tech", "keyword": "hardware", "city": "Pune"}` returns a yes/no verdict on whether the company is actually in that field, with the evidence behind it.
 
 ### How much the bot can pull per city
 
@@ -100,6 +101,24 @@ Without it, the heuristic answer is used.
 The web app has a **Company industry** panel (company + city) that calls
 `/api/company-genre` and shows the inferred industry, confidence, method and the
 sample job titles behind it.
+
+### Field check
+
+`POST /api/company-match` answers the question "is this company actually in the
+field my keyword describes?". It searches the company's postings in the city,
+then checks whether the keyword - or, when the keyword names a whole industry,
+that industry's terms - appears in them. A posting naming the field in its
+**title** is the strongest signal; two or more mentions anywhere also count. A
+specific term such as "welding" is not broadened to its whole category, so it
+will not match unrelated roles.
+
+The response gives `matches` (true / false / null when there are no postings),
+`confidence`, `matched_postings`, `title_matches`, the expanded `field_terms`,
+and an `evidence` list of the postings that matched.
+
+Matching is title-and-text based. LinkedIn's guest endpoint returns no
+description, so set `JOBSPY_FETCH_DESCRIPTION=true` (slower) to give the matcher
+more text, and prefer the `ats` source where descriptions are included.
 
 ### De-duplication
 

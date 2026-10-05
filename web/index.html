@@ -20,6 +20,9 @@
     .genre-result .genre-head strong{font-size:1.15rem}
     .genre-titles{margin:10px 0 0;padding-left:18px}
     .genre-titles li{margin:2px 0;opacity:.85}
+    .verdict.yes{color:#3ddc84}
+    .verdict.no{color:#ff6b6b}
+    .verdict.unknown{color:#f0c674}
   </style>
 </head>
 <body>
@@ -67,20 +70,24 @@
     </section>
 
     <section class="search-card genre-card">
-      <p class="eyebrow">COMPANY INDUSTRY</p>
-      <h2 class="genre-heading">What does a company actually do?</h2>
-      <p class="subhead">Infer a company's industry from the roles it advertises in a city.</p>
+      <p class="eyebrow">FIELD CHECK</p>
+      <h2 class="genre-heading">Is this company actually in the field you're searching?</h2>
+      <p class="subhead">Checks a company's job postings for your keyword and tells you whether it really operates in that field.</p>
       <form id="genreForm" class="row g-3 align-items-start">
-        <div class="field col-12 col-lg-5">
+        <div class="field col-12 col-lg-4">
           <label for="genreCompany">Company</label>
           <div class="input-wrap"><input id="genreCompany" placeholder="e.g. Portescap" required></div>
         </div>
-        <div class="field col-12 col-lg-5">
+        <div class="field col-12 col-lg-3">
+          <label for="genreField">Field / keyword</label>
+          <div class="input-wrap"><input id="genreField" placeholder="e.g. electronics" required></div>
+        </div>
+        <div class="field col-12 col-lg-3">
           <label for="genreCity">City</label>
           <div class="input-wrap"><input id="genreCity" placeholder="e.g. Pune" required></div>
         </div>
         <div class="search-submit col-12 col-lg-2">
-          <button id="genreButton" class="btn btn-primary w-100" type="submit"><span>Infer industry</span></button>
+          <button id="genreButton" class="btn btn-primary w-100" type="submit"><span>Check field</span></button>
         </div>
       </form>
       <div id="genreResult" class="genre-result hidden" aria-live="polite"></div>

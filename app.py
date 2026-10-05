@@ -10,7 +10,7 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from network_year import current_year
-from genre import infer_genre
+from genre import infer_genre, match_field
 from jobsources import available_sources, search_jobs
 
 ROOT = Path(__file__).parent / "web"
@@ -112,7 +112,7 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        if self.path in {"/api/company-genre", "/api/job-search"}:
+        if self.path in {"/api/company-genre", "/api/job-search", "/api/company-match"}:
             return self.jobs_endpoint()
         if self.path not in {"/api/jobs", "/api/alternative-search"}:
             return self.json_response(404, {"error": "Not found"})
@@ -182,6 +182,27 @@ class Handler(SimpleHTTPRequestHandler):
         jobs, report = search_jobs(company, city, pages=pages, limit_per_source=max_jobs, sources=sources)
         summary = next((entry["summary"] for entry in report if "summary" in entry), {})
         matched = [job for job in jobs if company.lower() in (job.get("company") or "").lower()]
+        if self.path == "/api/company-match":
+            if not keyword:
+                return self.json_response(400, {"error": "keyword (the field) is required"})
+            verdict = match_field(matched, keyword)
+            return self.json_response(200, {
+                "company": company, "keyword": keyword, "city": city,
+                "matches": verdict["matches"],
+                "confidence": verdict["confidence"],
+                "matched_postings": verdict["matched_postings"],
+                "title_matches": verdict["title_matches"],
+                "total_postings": verdict["total_postings"],
+                "match_ratio": verdict["match_ratio"],
+                "field_terms": verdict["field_terms"],
+                "reason": verdict.get("reason"),
+                "evidence": verdict["evidence"][:10],
+                "postings_found": summary.get("raw_total", len(jobs)),
+                "postings_unique": len(jobs),
+                "duplicates_merged": summary.get("merged", 0),
+                "company_matched": len(matched),
+                "sources": report,
+            })
         corpus = matched
         if corpus:
             genre = infer_genre(corpus)

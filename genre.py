@@ -207,3 +207,87 @@ def infer_genre(jobs, llm_threshold=LLM_THRESHOLD):
             "observed_industries": heuristic.get("observed_industries", []),
         }
     return {"genre": None, "confidence": 0.0, "method": "none"}
+
+
+# --------------------------------------------------------------------------- #
+# Field match: is this company actually in the field the keyword describes?
+# --------------------------------------------------------------------------- #
+
+def field_terms(keyword):
+    """Expand a free-text field keyword into match terms.
+
+    The keyword's own words are always used. The keyword is expanded to a whole
+    taxonomy industry's keywords only when it names that industry (e.g.
+    "electronics" -> the electronics keywords). A specific technique such as
+    "welding" is left as-is, so it does not match everything in its wider
+    category.
+    """
+    keyword = (keyword or "").lower().strip()
+    if not keyword:
+        return set()
+    terms = {t for t in re.findall(r"[a-z0-9+#.]+", keyword) if len(t) > 2}
+    for genre, keywords in TAXONOMY.items():
+        if keyword in genre.lower():
+            terms.update(keywords)
+    return terms
+
+
+def match_field(jobs, keyword):
+    """Decide whether a company's postings show it operates in the keyword's field.
+
+    Returns a verdict dict. ``matches`` is True when at least one posting names
+    the field in its title, or at least two mention it anywhere - i.e. there is
+    real evidence the company hires for that field. ``confidence`` weights title
+    matches 1.5x. With no postings, ``matches`` is None (unknown).
+    """
+    terms = field_terms(keyword)
+    total = len(jobs)
+    result = {
+        "keyword": keyword,
+        "field_terms": sorted(terms),
+        "total_postings": total,
+        "matched_postings": 0,
+        "title_matches": 0,
+        "match_ratio": 0.0,
+        "matches": None,
+        "confidence": 0.0,
+        "evidence": [],
+    }
+    if not jobs:
+        result["reason"] = "no postings found for this company in this city"
+        return result
+    if not terms:
+        result["reason"] = "keyword is too short to match on"
+        return result
+
+    evidence = []
+    for job in jobs:
+        title = (job.get("title") or "").lower()
+        body = " ".join(
+            str(job.get(key) or "")
+            for key in ("title", "description", "company_industry", "skills")
+        ).lower()
+        hits = sorted({t for t in terms if t in body})
+        if not hits:
+            continue
+        title_hits = sorted({t for t in terms if t in title})
+        result["matched_postings"] += 1
+        if title_hits:
+            result["title_matches"] += 1
+        evidence.append({
+            "title": job.get("title", ""),
+            "company": job.get("company", ""),
+            "location": job.get("location", ""),
+            "url": job.get("url", ""),
+            "matched_terms": hits,
+            "in_title": bool(title_hits),
+            "sources": job.get("sources", []),
+        })
+    result["evidence"] = evidence
+    result["match_ratio"] = round(result["matched_postings"] / total, 2)
+    result["matches"] = result["title_matches"] >= 1 or result["matched_postings"] >= 2
+    result["confidence"] = round(
+        min(0.99, (1.5 * result["title_matches"] + result["matched_postings"]) / (1.5 * total)),
+        2,
+    )
+    return result

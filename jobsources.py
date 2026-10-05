@@ -469,7 +469,7 @@ class JobSpySource(JobSource):
             location=location or None,
             results_wanted=wanted,
             country_indeed=self.country,
-            fetch_description=False,
+            fetch_description=os.environ.get("JOBSPY_FETCH_DESCRIPTION", "false").lower() == "true",
             verbose=0,
         )
         return jobspy_rows_to_jobs(frame, limit)

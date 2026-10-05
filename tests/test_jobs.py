@@ -328,6 +328,28 @@ class EndpointTests(unittest.TestCase):
         except urllib.error.HTTPError as error:
             self.assertEqual(error.code, 400)
 
+    def test_company_match_endpoint(self):
+        original_search, original_match = app.search_jobs, app.match_field
+        app.search_jobs = lambda *a, **k: (
+            [{"title": "SMT Engineer", "company": "Acme", "description": ""}],
+            [{"source": "linkedin", "count": 1},
+             {"summary": {"raw_total": 1, "unique": 1, "merged": 0}}],
+        )
+        app.match_field = lambda corpus, keyword: {
+            "matches": True, "confidence": 0.9, "matched_postings": 1, "title_matches": 1,
+            "total_postings": 1, "match_ratio": 1.0, "field_terms": ["smt"], "evidence": [],
+        }
+        try:
+            payload = self._post(
+                "/api/company-match",
+                {"company": "Acme", "keyword": "electronics", "city": "Pune"},
+            )
+        finally:
+            app.search_jobs, app.match_field = original_search, original_match
+        self.assertTrue(payload["matches"])
+        self.assertEqual(payload["confidence"], 0.9)
+        self.assertEqual(payload["company"], "Acme")
+
 
 class JobSpyMappingTests(unittest.TestCase):
     def test_maps_list_of_dicts(self):
@@ -458,6 +480,42 @@ class DedupeTests(unittest.TestCase):
         self.assertEqual(summary["raw_total"], 2)
         self.assertEqual(summary["unique"], 1)
         self.assertEqual(summary["merged"], 1)
+
+
+class FieldMatchTests(unittest.TestCase):
+    def test_field_terms_expand_from_taxonomy(self):
+        terms = genre.field_terms("electronics")
+        self.assertIn("pcb", terms)
+        self.assertIn("soldering", terms)
+
+    def test_field_terms_plain_keyword(self):
+        terms = genre.field_terms("welding")
+        self.assertIn("welding", terms)
+
+    def test_specific_term_does_not_expand_to_whole_category(self):
+        terms = genre.field_terms("welding")
+        self.assertIn("welding", terms)
+        self.assertNotIn("lathe", terms)
+
+    def test_match_when_title_matches(self):
+        jobs = [{"title": "SMT Process Engineer", "company": "Acme", "description": ""}]
+        verdict = genre.match_field(jobs, "electronics")
+        self.assertTrue(verdict["matches"])
+        self.assertGreaterEqual(verdict["title_matches"], 1)
+
+    def test_no_match_when_unrelated(self):
+        jobs = [
+            {"title": "Sales Manager", "company": "Acme", "description": "retail sales"},
+            {"title": "HR Partner", "company": "Acme", "description": "recruiting"},
+        ]
+        verdict = genre.match_field(jobs, "electronics")
+        self.assertFalse(verdict["matches"])
+        self.assertEqual(verdict["matched_postings"], 0)
+
+    def test_unknown_when_no_postings(self):
+        verdict = genre.match_field([], "electronics")
+        self.assertIsNone(verdict["matches"])
+        self.assertIn("reason", verdict)
 
 
 if __name__ == "__main__":
