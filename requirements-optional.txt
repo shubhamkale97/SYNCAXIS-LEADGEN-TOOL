@@ -1,0 +1,4 @@
+# Optional: the "jobspy" source (multi-board scraper library). Heavier - it
+# pulls pandas/numpy - so it is installed separately and can be skipped with
+# `--build-arg INSTALL_JOBSPY=false`.
+python-jobspy

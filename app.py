@@ -10,6 +10,8 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from network_year import current_year
+from genre import infer_genre, match_field
+from jobsources import available_sources, search_jobs
 
 ROOT = Path(__file__).parent / "web"
 SCRAPER_URL = os.environ.get("SCRAPER_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
@@ -105,9 +107,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self.proxy("GET", f"/api/v1/jobs/{suffix}")
         if parsed.path == "/api/jobs":
             return self.proxy("GET", "/api/v1/jobs")
+        if parsed.path == "/api/job-sources":
+            return self.json_response(200, {"sources": available_sources()})
         return super().do_GET()
 
     def do_POST(self):
+        if self.path in {"/api/company-genre", "/api/job-search", "/api/company-match"}:
+            return self.jobs_endpoint()
         if self.path not in {"/api/jobs", "/api/alternative-search"}:
             return self.json_response(404, {"error": "Not found"})
         try:
@@ -138,6 +144,83 @@ class Handler(SimpleHTTPRequestHandler):
             "fast_mode": False, "max_time": 600,
         }
         return self.proxy("POST", "/api/v1/jobs", payload)
+
+    def jobs_endpoint(self):
+        """Search job postings and infer a company's industry from them."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            incoming = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError) as error:
+            return self.json_response(400, {"error": str(error)})
+        company = str(incoming.get("company", "")).strip()[:120]
+        keyword = str(incoming.get("keyword", "")).strip()[:120]
+        city = str(incoming.get("city", "") or incoming.get("location", "")).strip()[:120]
+        sources = incoming.get("sources")
+        if sources is not None and not isinstance(sources, list):
+            return self.json_response(400, {"error": "sources must be a list of source names"})
+        try:
+            pages = max(1, min(int(incoming.get("pages", 2)), 5))
+            max_jobs = max(5, min(int(incoming.get("max_jobs", 40)), 200))
+        except (ValueError, TypeError):
+            return self.json_response(400, {"error": "pages and max_jobs must be integers"})
+        if not city:
+            return self.json_response(400, {"error": "city (or location) is required"})
+        if self.path == "/api/job-search":
+            if not keyword:
+                return self.json_response(400, {"error": "keyword is required"})
+            jobs, report = search_jobs(keyword, city, pages=pages, limit_per_source=max_jobs, sources=sources)
+            summary = next((entry["summary"] for entry in report if "summary" in entry), {})
+            return self.json_response(200, {
+                "keyword": keyword, "city": city, "count": len(jobs),
+                "unique": summary.get("unique", len(jobs)),
+                "raw_total": summary.get("raw_total", len(jobs)),
+                "duplicates_merged": summary.get("merged", 0),
+                "sources": report, "jobs": jobs,
+            })
+        if not company:
+            return self.json_response(400, {"error": "company is required"})
+        jobs, report = search_jobs(company, city, pages=pages, limit_per_source=max_jobs, sources=sources)
+        summary = next((entry["summary"] for entry in report if "summary" in entry), {})
+        matched = [job for job in jobs if company.lower() in (job.get("company") or "").lower()]
+        if self.path == "/api/company-match":
+            if not keyword:
+                return self.json_response(400, {"error": "keyword (the field) is required"})
+            verdict = match_field(matched, keyword)
+            return self.json_response(200, {
+                "company": company, "keyword": keyword, "city": city,
+                "matches": verdict["matches"],
+                "confidence": verdict["confidence"],
+                "matched_postings": verdict["matched_postings"],
+                "title_matches": verdict["title_matches"],
+                "total_postings": verdict["total_postings"],
+                "match_ratio": verdict["match_ratio"],
+                "field_terms": verdict["field_terms"],
+                "reason": verdict.get("reason"),
+                "evidence": verdict["evidence"][:10],
+                "postings_found": summary.get("raw_total", len(jobs)),
+                "postings_unique": len(jobs),
+                "duplicates_merged": summary.get("merged", 0),
+                "company_matched": len(matched),
+                "sources": report,
+            })
+        corpus = matched
+        if corpus:
+            genre = infer_genre(corpus)
+        else:
+            genre = {
+                "genre": None, "confidence": 0.0, "method": "none",
+                "reason": "no postings found for this company in this city",
+            }
+        return self.json_response(200, {
+            "company": company, "city": city, "genre": genre,
+            "postings_found": summary.get("raw_total", len(jobs)),
+            "postings_unique": len(jobs),
+            "duplicates_merged": summary.get("merged", 0),
+            "postings_used": len(corpus), "company_matched": len(matched),
+            "sources": report,
+            "sample_titles": [job.get("title", "") for job in corpus[:20]],
+            "sample_jobs": corpus[:10],
+        })
 
     def alternative_search(self, keyword, latitude, longitude, radius_km):
         """Keyless background search using OpenStreetMap's Overpass API."""

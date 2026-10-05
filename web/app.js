@@ -26,6 +26,7 @@ function showResolved(location) {
   $("resolvedCoordinates").textContent = `${Number(location.lat).toFixed(6)}, ${Number(location.lon).toFixed(6)} · ${location.provider || "exact coordinates"}`;
   $("locationResolution").classList.remove("hidden");
   $("latitude").value = location.lat; $("longitude").value = location.lon;
+  setSearchArea(location.lat, location.lon, Number($("radius").value) || 10);
 }
 async function resolveTypedLocation(force=false) {
   const query = $("location").value.trim();
@@ -51,12 +52,14 @@ function updateMetrics() {
 }
 function render() {
   const query = $("filter").value.toLowerCase().trim();
-  const visible = rows.filter((row) => Object.values(row).join(" ").toLowerCase().includes(query));
-  $("resultRows").innerHTML = visible.map((row) => {
+  const numbered = rows.map((row, i) => ({ row, n: i + 1 }));
+  const visible = numbered.filter(({ row }) => Object.values(row).join(" ").toLowerCase().includes(query));
+  $("resultRows").innerHTML = visible.map(({ row, n }) => {
     const name=value(row,"title","name"), website=value(row,"website"), phone=value(row,"phone"), email=value(row,"emails","email");
     const rating=value(row,"review_rating","rating"), reviews=value(row,"review_count","reviews");
-    return `<tr><td><strong>${escapeHtml(name||"Untitled business")}</strong>${website?`<a href="${escapeHtml(safeUrl(website))}" target="_blank" rel="noopener">Visit website ↗</a>`:"<span class=muted>No website</span>"}</td><td>${escapeHtml(value(row,"category")||"—")}</td><td>${phone?`<a href="tel:${escapeHtml(phone)}">${escapeHtml(phone)}</a>`:"—"}${email?`<br><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a>`:""}</td><td class="rating">${rating?`★ ${escapeHtml(rating)}`:"—"}${reviews?`<br><small>${escapeHtml(reviews)} reviews</small>`:""}</td><td>${escapeHtml(value(row,"address")||"—")}</td><td><span class="source-pill">${escapeHtml(row._search||"Search")}</span><small class="source-location">${escapeHtml(row._location||"")}</small></td></tr>`;
+    return `<tr><td class="lead-no">${n}</td><td><strong>${escapeHtml(name||"Untitled business")}</strong>${website?`<a href="${escapeHtml(safeUrl(website))}" target="_blank" rel="noopener">Visit website ↗</a>`:"<span class=muted>No website</span>"}</td><td>${escapeHtml(value(row,"category")||"—")}</td><td>${phone?`<a href="tel:${escapeHtml(phone)}">${escapeHtml(phone)}</a>`:"—"}${email?`<br><a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a>`:""}</td><td class="rating">${rating?`★ ${escapeHtml(rating)}`:"—"}${reviews?`<br><small>${escapeHtml(reviews)} reviews</small>`:""}</td><td>${escapeHtml(value(row,"address")||"—")}</td><td><span class="source-pill">${escapeHtml(row._search||"Search")}</span><small class="source-location">${escapeHtml(row._location||"")}</small></td></tr>`;
   }).join("");
+  renderLeadMarkers();
   $("resultCount").textContent=rows.length; $("emptyFilter").classList.toggle("hidden",visible.length>0);
   $("emptyFilter").textContent=rows.length?"No leads match that filter.":"No leads yet. Run your first search above and results will appear here."; updateMetrics();
 }
@@ -132,6 +135,91 @@ $("useLocation").addEventListener("click",()=>{if(!navigator.geolocation)return 
 $("location").addEventListener("input",()=>{browserCoordinates=null;resolvedLocation=null;resolvedQuery="";$("latitude").value="";$("longitude").value="";$("location").required=true;$("locationResolution").classList.add("hidden");clearTimeout(locationTimer);locationTimer=setTimeout(()=>resolveTypedLocation(),700);});
 $("location").addEventListener("blur",()=>resolveTypedLocation());
 [$("latitude"),$("longitude")].forEach((input)=>input.addEventListener("input",()=>{resolvedLocation=null;resolvedQuery="";browserCoordinates=null;const lat=$("latitude").value,lon=$("longitude").value;if(lat&&lon){resolvedQuery=$("location").value.trim();showResolved({lat,lon,label:"Manual coordinates",provider:"manual"});}}));
-$("radius").addEventListener("input",()=>{$("radiusValue").textContent=`${$("radius").value} km`;});
+$("radius").addEventListener("input",()=>{$("radiusValue").textContent=`${$("radius").value} km`;if(resolvedLocation)setSearchArea(resolvedLocation.lat,resolvedLocation.lon,Number($("radius").value));});
 $("filter").addEventListener("input",render);$("downloadButton").addEventListener("click",downloadCsv);$("excelButton").addEventListener("click",downloadExcel);$("pdfButton").addEventListener("click",()=>{if(rows.length)window.print();});$("clearButton").addEventListener("click",()=>{if(confirm("Clear all collected leads from this page?")){rows=[];render();$("resultsMessage").textContent="Lead list cleared. Run a search to start again.";}});
+let map=null,areaMarker=null,areaCircle=null,leadLayer=null,companyLayer=null;
+
+function ensureMap(){
+  if(map)return map;
+  const el=$("map");
+  if(!el||typeof L==="undefined")return null;
+  map=L.map(el).setView([20.5937,78.9629],5);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"(c) OpenStreetMap"}).addTo(map);
+  leadLayer=L.layerGroup().addTo(map); companyLayer=L.layerGroup().addTo(map);
+  setTimeout(()=>map.invalidateSize(),200);
+  return map;
+}
+function pinIcon(label,kind){return L.divIcon({className:"map-pin-wrap",html:`<span class="map-pin ${kind}">${label}</span>`,iconSize:[26,26],iconAnchor:[13,13]});}
+function setSearchArea(lat,lon,radiusKm){
+  const m=ensureMap(); if(!m)return;
+  const a=Number(lat),o=Number(lon);
+  if(!Number.isFinite(a)||!Number.isFinite(o))return;
+  const ll=[a,o], meters=Math.max(50,(Number(radiusKm)||0)*1000);
+  if(areaMarker)areaMarker.setLatLng(ll); else areaMarker=L.marker(ll,{icon:pinIcon("","area")}).addTo(m);
+  if(areaCircle)areaCircle.setLatLng(ll).setRadius(meters); else areaCircle=L.circle(ll,{radius:meters,color:"#3ddc84",weight:2,fillColor:"#3ddc84",fillOpacity:0.12}).addTo(m);
+  m.fitBounds(areaCircle.getBounds(),{padding:[24,24]});
+  const hint=$("mapHint"); if(hint)hint.textContent=`Radius ${Number(radiusKm)||0} km`;
+}
+function renderLeadMarkers(){
+  const m=ensureMap(); if(!m)return;
+  leadLayer.clearLayers();
+  rows.forEach((row,i)=>{
+    const lat=Number(value(row,"latitude","lat")),lon=Number(value(row,"longitude","lon","lng"));
+    if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return;
+    L.marker([lat,lon],{icon:pinIcon(i+1,"lead"),title:value(row,"title","name")})
+      .bindPopup(`<strong>${escapeHtml(value(row,"title","name")||("Lead "+(i+1)))}</strong><br>${escapeHtml(value(row,"address"))}`)
+      .addTo(leadLayer);
+  });
+}
+async function addCompanyMarker(company,locationText){
+  const m=ensureMap(); if(!m)return;
+  let lat=null,lon=null;
+  const q=(locationText||"").trim();
+  if(q){try{const g=await request(`/api/geocode?q=${encodeURIComponent(q)}`);lat=Number(g.lat);lon=Number(g.lon);}catch(e){}}
+  if(!Number.isFinite(lat)||!Number.isFinite(lon)){if(resolvedLocation){lat=Number(resolvedLocation.lat);lon=Number(resolvedLocation.lon);}}
+  if(!Number.isFinite(lat)||!Number.isFinite(lon))return;
+  companyLayer.clearLayers();
+  L.marker([lat,lon],{icon:pinIcon(rows.length+1,"company"),title:company})
+    .bindPopup(`<strong>${escapeHtml(company)}</strong><br>shortlisted (field match)`).addTo(companyLayer);
+  m.setView([lat,lon],Math.max(m.getZoom(),12));
+}
+
 render();checkHealth();
+
+const genreForm = $("genreForm");
+if (genreForm) {
+  genreForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = $("genreButton");
+    const company = $("genreCompany").value.trim();
+    const field = $("genreField").value.trim();
+    const city = $("genreCity").value.trim();
+    if (!company || !field || !city) return;
+    button.disabled = true;
+    const box = $("genreResult");
+    box.classList.remove("hidden");
+    box.innerHTML = `<p class="results-message">Checking ${escapeHtml(company)} for "${escapeHtml(field)}" in ${escapeHtml(city)}…</p>`;
+    try {
+      const p = await request("/api/company-match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ company, keyword: field, city }),
+      });
+      const verdict = p.matches === true ? "Yes — in this field"
+        : p.matches === false ? "No — no evidence of this field" : "Unknown — no postings found";
+      const cls = p.matches === true ? "verdict yes" : p.matches === false ? "verdict no" : "verdict unknown";
+      const evidence = (p.evidence || []).slice(0, 6).map((e) =>
+        `<li>${escapeHtml(e.title)}${e.in_title ? " <small>(title match)</small>" : ""} — ${escapeHtml((e.matched_terms || []).join(", "))}</li>`).join("");
+      box.innerHTML = `<div class="genre-head"><strong class="${cls}">${escapeHtml(verdict)}</strong>`
+        + `<span class="source-pill">${p.confidence != null ? Math.round(p.confidence * 100) + "% confidence" : ""}</span></div>`
+        + `<p class="results-message">${p.matched_postings} of ${p.total_postings} of this company's postings match "${escapeHtml(field)}"`
+        + `${p.reason ? " · " + escapeHtml(p.reason) : ""}</p>`
+        + (evidence ? `<ul class="genre-titles">${evidence}</ul>` : "");
+      if (p.matches === true) addCompanyMarker(company, (p.evidence && p.evidence[0] && p.evidence[0].location) || city);
+    } catch (error) {
+      box.innerHTML = `<p class="results-message">Check failed: ${escapeHtml(error.message)}</p>`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
