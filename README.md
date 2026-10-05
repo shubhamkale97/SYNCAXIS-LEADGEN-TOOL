@@ -56,6 +56,8 @@ advertised in a given city. It searches one or more job sources, then classifies
 the company from the roles' titles and descriptions - keyword heuristics first,
 with an optional LLM fallback for ambiguous cases.
 
+All four sources have a free tier, so the tool can run entirely on free options: LinkedIn's guest endpoint and SerpAPI need no payment (SerpAPI gives 250 searches/month free), and Adzuna and Jooble issue free keys.
+
 ### Sources
 
 Selected by `JOB_SOURCES` (comma separated) or per request via the `sources`
