@@ -295,6 +295,11 @@ class EndpointTests(unittest.TestCase):
         names = {source["name"] for source in payload["sources"]}
         self.assertEqual(names, {"ats", "linkedin", "jobspy", "adzuna", "jooble", "serpapi"})
 
+    def test_map_config_endpoint(self):
+        payload = self._get("/api/map-config")
+        self.assertIn(payload["provider"], {"google", "here", "osm"})
+        self.assertIn("key", payload)
+
     def test_company_genre_endpoint(self):
         original_search, original_infer = app.search_jobs, app.infer_genre
         app.search_jobs = lambda *a, **k: (

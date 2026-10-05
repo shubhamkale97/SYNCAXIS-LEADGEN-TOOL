@@ -121,6 +121,8 @@ $("searchForm").addEventListener("submit",async(event)=>{
     if (activeSearchArea && (Math.abs(Number(activeSearchArea.lat)-Number(area.lat))>0.001 || Math.abs(Number(activeSearchArea.lon)-Number(area.lon))>0.001 || activeSearchArea.radiusKm!==radiusKm)) { rows=[]; render(); }
     activeSearchArea=area;
     const locationName = location.provider === "manual" || location.provider === "browser GPS" ? "" : $("location").value.trim();
+    const fieldCompany=($("fieldCompany")||{}).value?$("fieldCompany").value.trim():"";
+    if(fieldCompany)runFieldCheck(fieldCompany,keyword,locationName||location.label);
     $("progressTitle").textContent=`Finding ${keyword}…`;$("progressText").textContent="Google Maps + keyless OpenStreetMap search running in parallel";
     request("/api/alternative-search",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({keyword,lat:location.lat,lon:location.lon,radius_km:radiusKm})})
       .then((payload)=>{const added=addRows(payload.results||[],`${keyword} · OSM`,location.label,area);if(added){$("resultsMessage").textContent=`${added} leads added by the background OpenStreetMap search. Google Maps is still running…`;toast(`${added} alternative map results added.`);}})
@@ -137,89 +139,137 @@ $("location").addEventListener("blur",()=>resolveTypedLocation());
 [$("latitude"),$("longitude")].forEach((input)=>input.addEventListener("input",()=>{resolvedLocation=null;resolvedQuery="";browserCoordinates=null;const lat=$("latitude").value,lon=$("longitude").value;if(lat&&lon){resolvedQuery=$("location").value.trim();showResolved({lat,lon,label:"Manual coordinates",provider:"manual"});}}));
 $("radius").addEventListener("input",()=>{$("radiusValue").textContent=`${$("radius").value} km`;if(resolvedLocation)setSearchArea(resolvedLocation.lat,resolvedLocation.lon,Number($("radius").value));});
 $("filter").addEventListener("input",render);$("downloadButton").addEventListener("click",downloadCsv);$("excelButton").addEventListener("click",downloadExcel);$("pdfButton").addEventListener("click",()=>{if(rows.length)window.print();});$("clearButton").addEventListener("click",()=>{if(confirm("Clear all collected leads from this page?")){rows=[];render();$("resultsMessage").textContent="Lead list cleared. Run a search to start again.";}});
-let map=null,areaMarker=null,areaCircle=null,leadLayer=null,companyLayer=null;
+let mapView=null,mapProvider=null;
 
-function ensureMap(){
-  if(map)return map;
-  const el=$("map");
-  if(!el||typeof L==="undefined")return null;
-  map=L.map(el).setView([20.5937,78.9629],5);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"(c) OpenStreetMap"}).addTo(map);
-  leadLayer=L.layerGroup().addTo(map); companyLayer=L.layerGroup().addTo(map);
-  setTimeout(()=>map.invalidateSize(),200);
-  return map;
+async function initMap(){
+  if(mapView)return mapView;
+  let cfg={provider:"osm",key:""};
+  try{cfg=await request("/api/map-config");}catch(e){}
+  const el=$("map"); if(!el)return null;
+  if(cfg.provider==="google"&&cfg.key&&!(window.google&&window.google.maps)){
+    try{await loadGoogleMaps(cfg.key);}catch(e){cfg={provider:"osm",key:""};}
+  }
+  if(cfg.provider==="google"&&window.google&&window.google.maps){mapView=createGoogleView(el);mapProvider="google";}
+  else if(typeof L!=="undefined"){mapView=createLeafletView(el,cfg);mapProvider=cfg.provider==="here"?"here":"osm";}
+  refreshMap();
+  return mapView;
 }
-function pinIcon(label,kind){return L.divIcon({className:"map-pin-wrap",html:`<span class="map-pin ${kind}">${label}</span>`,iconSize:[26,26],iconAnchor:[13,13]});}
-function setSearchArea(lat,lon,radiusKm){
-  const m=ensureMap(); if(!m)return;
-  const a=Number(lat),o=Number(lon);
-  if(!Number.isFinite(a)||!Number.isFinite(o))return;
-  const ll=[a,o], meters=Math.max(50,(Number(radiusKm)||0)*1000);
-  if(areaMarker)areaMarker.setLatLng(ll); else areaMarker=L.marker(ll,{icon:pinIcon("","area")}).addTo(m);
-  if(areaCircle)areaCircle.setLatLng(ll).setRadius(meters); else areaCircle=L.circle(ll,{radius:meters,color:"#3ddc84",weight:2,fillColor:"#3ddc84",fillOpacity:0.12}).addTo(m);
-  m.fitBounds(areaCircle.getBounds(),{padding:[24,24]});
-  const hint=$("mapHint"); if(hint)hint.textContent=`Radius ${Number(radiusKm)||0} km`;
-}
-function renderLeadMarkers(){
-  const m=ensureMap(); if(!m)return;
-  leadLayer.clearLayers();
-  rows.forEach((row,i)=>{
-    const lat=Number(value(row,"latitude","lat")),lon=Number(value(row,"longitude","lon","lng"));
-    if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return;
-    L.marker([lat,lon],{icon:pinIcon(i+1,"lead"),title:value(row,"title","name")})
-      .bindPopup(`<strong>${escapeHtml(value(row,"title","name")||("Lead "+(i+1)))}</strong><br>${escapeHtml(value(row,"address"))}`)
-      .addTo(leadLayer);
+
+function loadGoogleMaps(key){
+  return new Promise((resolve,reject)=>{
+    const s=document.createElement("script");
+    s.src=`https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}`;
+    s.async=true; s.onload=()=>resolve(); s.onerror=()=>reject(new Error("google maps failed to load"));
+    document.head.appendChild(s);
   });
 }
+
+function pinIcon(label,kind){return L.divIcon({className:"map-pin-wrap",html:`<span class="map-pin ${kind}">${label}</span>`,iconSize:[26,26],iconAnchor:[13,13]});}
+
+function createLeafletView(el,cfg){
+  const m=L.map(el).setView([20.5937,78.9629],5);
+  const here=cfg.provider==="here"&&cfg.key;
+  const url=here?`https://maps.hereapi.com/v3/base/mc/{z}/{x}/{y}/png8?size=512&style=explore&apiKey=${encodeURIComponent(cfg.key)}`:"https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+  L.tileLayer(url,{maxZoom:19,attribution:here?"(c) HERE":"(c) OpenStreetMap"}).addTo(m);
+  const leadLayer=L.layerGroup().addTo(m),companyLayer=L.layerGroup().addTo(m);
+  let areaMarker=null,areaCircle=null;
+  setTimeout(()=>m.invalidateSize(),200);
+  return { kind:"leaflet", map:m,
+    setArea(lat,lon,radiusKm){
+      const a=Number(lat),o=Number(lon); if(!Number.isFinite(a)||!Number.isFinite(o))return;
+      const ll=[a,o],meters=Math.max(50,(Number(radiusKm)||0)*1000);
+      if(areaMarker)areaMarker.setLatLng(ll); else areaMarker=L.marker(ll,{icon:pinIcon("","area")}).addTo(m);
+      if(areaCircle)areaCircle.setLatLng(ll).setRadius(meters); else areaCircle=L.circle(ll,{radius:meters,color:"#3ddc84",weight:2,fillColor:"#3ddc84",fillOpacity:0.12}).addTo(m);
+      m.fitBounds(areaCircle.getBounds(),{padding:[24,24]});
+    },
+    setLeads(list){
+      leadLayer.clearLayers();
+      list.forEach((row,idx)=>{
+        const lat=Number(value(row,"latitude","lat")),lon=Number(value(row,"longitude","lon","lng"));
+        if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return;
+        L.marker([lat,lon],{icon:pinIcon(idx+1,"lead"),title:value(row,"title","name")})
+          .bindPopup(`<strong>${escapeHtml(value(row,"title","name")||("Lead "+(idx+1)))}</strong><br>${escapeHtml(value(row,"address"))}`)
+          .addTo(leadLayer);
+      });
+    },
+    addCompany(company,lat,lon,n){
+      companyLayer.clearLayers();
+      L.marker([lat,lon],{icon:pinIcon(n,"company"),title:company})
+        .bindPopup(`<strong>${escapeHtml(company)}</strong><br>shortlisted (field match)`).addTo(companyLayer);
+      m.setView([lat,lon],Math.max(m.getZoom(),12));
+    }
+  };
+}
+
+function createGoogleView(el){
+  const m=new google.maps.Map(el,{center:{lat:20.5937,lng:78.9629},zoom:5,mapTypeControl:false,streetViewControl:false,fullscreenControl:false});
+  let areaMarker=null,areaCircle=null,leadMarkers=[],companyMarker=null;
+  return { kind:"google", map:m,
+    setArea(lat,lon,radiusKm){
+      const c={lat:Number(lat),lng:Number(lon)}; if(!Number.isFinite(c.lat)||!Number.isFinite(c.lng))return;
+      const r=Math.max(50,(Number(radiusKm)||0)*1000);
+      if(areaMarker)areaMarker.setPosition(c); else areaMarker=new google.maps.Marker({position:c,map:m,label:"•"});
+      if(areaCircle){areaCircle.setCenter(c);areaCircle.setRadius(r);} else areaCircle=new google.maps.Circle({center:c,radius:r,map:m,strokeColor:"#3ddc84",strokeWeight:2,fillColor:"#3ddc84",fillOpacity:0.12});
+      m.fitBounds(areaCircle.getBounds());
+    },
+    setLeads(list){
+      leadMarkers.forEach(x=>x.setMap(null)); leadMarkers=[];
+      list.forEach((row,idx)=>{
+        const lat=Number(value(row,"latitude","lat")),lon=Number(value(row,"longitude","lon","lng"));
+        if(!Number.isFinite(lat)||!Number.isFinite(lon)||Math.abs(lat)>90||Math.abs(lon)>180)return;
+        leadMarkers.push(new google.maps.Marker({position:{lat:lat,lng:lon},map:m,label:String(idx+1),title:value(row,"title","name")||("Lead "+(idx+1))}));
+      });
+    },
+    addCompany(company,lat,lon,n){
+      if(companyMarker)companyMarker.setMap(null);
+      companyMarker=new google.maps.Marker({position:{lat:Number(lat),lng:Number(lon)},map:m,label:String(n),title:company,icon:"https://maps.google.com/mapfiles/ms/icons/yellow-dot.png"});
+      m.setCenter({lat:Number(lat),lng:Number(lon)}); m.setZoom(Math.max(m.getZoom(),12));
+    }
+  };
+}
+
+function setSearchArea(lat,lon,radiusKm){
+  const hint=$("mapHint"); if(hint)hint.textContent=`Radius ${Number(radiusKm)||0} km`;
+  if(!mapView){initMap();return;}
+  mapView.setArea(lat,lon,radiusKm);
+}
+function refreshMap(){
+  if(!mapView)return;
+  mapView.setLeads(rows);
+  if(resolvedLocation)mapView.setArea(resolvedLocation.lat,resolvedLocation.lon,Number($("radius").value)||10);
+}
+function renderLeadMarkers(){ if(mapView)mapView.setLeads(rows); else initMap(); }
 async function addCompanyMarker(company,locationText){
-  const m=ensureMap(); if(!m)return;
+  if(!mapView)await initMap();
+  if(!mapView)return;
   let lat=null,lon=null;
   const q=(locationText||"").trim();
   if(q){try{const g=await request(`/api/geocode?q=${encodeURIComponent(q)}`);lat=Number(g.lat);lon=Number(g.lon);}catch(e){}}
   if(!Number.isFinite(lat)||!Number.isFinite(lon)){if(resolvedLocation){lat=Number(resolvedLocation.lat);lon=Number(resolvedLocation.lon);}}
   if(!Number.isFinite(lat)||!Number.isFinite(lon))return;
-  companyLayer.clearLayers();
-  L.marker([lat,lon],{icon:pinIcon(rows.length+1,"company"),title:company})
-    .bindPopup(`<strong>${escapeHtml(company)}</strong><br>shortlisted (field match)`).addTo(companyLayer);
-  m.setView([lat,lon],Math.max(m.getZoom(),12));
+  mapView.addCompany(company,lat,lon,rows.length+1);
 }
 
+initMap();
 render();checkHealth();
 
-const genreForm = $("genreForm");
-if (genreForm) {
-  genreForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = $("genreButton");
-    const company = $("genreCompany").value.trim();
-    const field = $("genreField").value.trim();
-    const city = $("genreCity").value.trim();
-    if (!company || !field || !city) return;
-    button.disabled = true;
-    const box = $("genreResult");
-    box.classList.remove("hidden");
-    box.innerHTML = `<p class="results-message">Checking ${escapeHtml(company)} for "${escapeHtml(field)}" in ${escapeHtml(city)}…</p>`;
-    try {
-      const p = await request("/api/company-match", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ company, keyword: field, city }),
-      });
-      const verdict = p.matches === true ? "Yes — in this field"
-        : p.matches === false ? "No — no evidence of this field" : "Unknown — no postings found";
-      const cls = p.matches === true ? "verdict yes" : p.matches === false ? "verdict no" : "verdict unknown";
-      const evidence = (p.evidence || []).slice(0, 6).map((e) =>
-        `<li>${escapeHtml(e.title)}${e.in_title ? " <small>(title match)</small>" : ""} — ${escapeHtml((e.matched_terms || []).join(", "))}</li>`).join("");
-      box.innerHTML = `<div class="genre-head"><strong class="${cls}">${escapeHtml(verdict)}</strong>`
-        + `<span class="source-pill">${p.confidence != null ? Math.round(p.confidence * 100) + "% confidence" : ""}</span></div>`
-        + `<p class="results-message">${p.matched_postings} of ${p.total_postings} of this company's postings match "${escapeHtml(field)}"`
-        + `${p.reason ? " · " + escapeHtml(p.reason) : ""}</p>`
-        + (evidence ? `<ul class="genre-titles">${evidence}</ul>` : "");
-      if (p.matches === true) addCompanyMarker(company, (p.evidence && p.evidence[0] && p.evidence[0].location) || city);
-    } catch (error) {
-      box.innerHTML = `<p class="results-message">Check failed: ${escapeHtml(error.message)}</p>`;
-    } finally {
-      button.disabled = false;
-    }
-  });
+async function runFieldCheck(company,field,city){
+  const box=$("fieldResult");
+  if(!box)return;
+  box.classList.remove("hidden");
+  box.innerHTML=`<p class="results-message">Checking ${escapeHtml(company)} for "${escapeHtml(field)}" in ${escapeHtml(city)}…</p>`;
+  try{
+    const p=await request("/api/company-match",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({company,keyword:field,city})});
+    const verdict=p.matches===true?"Yes — in this field":p.matches===false?"No — no evidence of this field":"Unknown — no postings found";
+    const cls=p.matches===true?"verdict yes":p.matches===false?"verdict no":"verdict unknown";
+    const evidence=(p.evidence||[]).slice(0,6).map((e)=>`<li>${escapeHtml(e.title)}${e.in_title?" <small>(title match)</small>":""} — ${escapeHtml((e.matched_terms||[]).join(", "))}</li>`).join("");
+    box.innerHTML=`<div class="genre-head"><strong class="${cls}">${escapeHtml(verdict)}</strong>`
+      +`<span class="source-pill">${p.confidence!=null?Math.round(p.confidence*100)+"% confidence":""}</span></div>`
+      +`<p class="results-message">${p.matched_postings} of ${p.total_postings} of ${escapeHtml(company)}'s postings match "${escapeHtml(field)}"`
+      +`${p.reason?" · "+escapeHtml(p.reason):""}</p>`
+      +(evidence?`<ul class="genre-titles">${evidence}</ul>`:"");
+    if(p.matches===true)addCompanyMarker(company,(p.evidence&&p.evidence[0]&&p.evidence[0].location)||city);
+  }catch(error){
+    box.innerHTML=`<p class="results-message">Field check failed: ${escapeHtml(error.message)}</p>`;
+  }
 }

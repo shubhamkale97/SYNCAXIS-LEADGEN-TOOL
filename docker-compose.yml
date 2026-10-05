@@ -15,6 +15,7 @@ services:
       SCRAPER_BASE_URL: http://google-maps-scraper:8080
       PORT: "3000"
       GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      HERE_API_KEY: ${HERE_API_KEY:-}
       JOB_SOURCES: ${JOB_SOURCES:-}
       ADZUNA_APP_ID: ${ADZUNA_APP_ID:-}
       ADZUNA_APP_KEY: ${ADZUNA_APP_KEY:-}

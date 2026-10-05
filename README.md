@@ -98,23 +98,27 @@ Without it, the heuristic answer is used.
 
 ### UI
 
-The web app has a **Field check** panel (company + field + city) that calls
-`/api/company-match` and shows a yes/no verdict on whether the company is in
-that field, with the matching job titles behind it.
+The field check is built into the main search form: enter a **Company**
+(optional) alongside your keyword and location, and the same "Find businesses"
+run also checks whether that company is actually in the field your keyword
+describes. The verdict (yes / no / unknown, with confidence and the matching job
+titles) appears under the form, and a matching company is dropped on the map.
 
 ### Map view
 
-A Leaflet map (vendored locally under `web/vendor/`) shows the whole search
-visually:
+The map shows the whole search visually:
 
 - the **selected location** as a marker, with the **search radius** drawn as a
   circle that follows the radius slider;
 - every collected lead as a **numbered marker** - the number matches the `#`
   column in the results table, so a row and its pin are easy to pair up;
-- the **shortlisted company** (when `/api/company-match` returns a match) as a
-  separate numbered marker, geocoded from the posting's location.
+- the **shortlisted company** (when the field check returns a match) as a
+  separate numbered marker, geocoded from its posting location.
 
-Tiles come from OpenStreetMap, so the map needs outbound internet at runtime -
+The provider is chosen by `GET /api/map-config`: **Google Maps** when
+`GOOGLE_MAPS_API_KEY` is set (needs the Maps JavaScript API enabled), otherwise
+**HERE** when `HERE_API_KEY` is set, otherwise keyless **OpenStreetMap** through
+the locally vendored Leaflet. Any provider needs outbound internet at runtime -
 the same requirement as geocoding.
 
 ### Field check

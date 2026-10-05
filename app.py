@@ -18,6 +18,7 @@ SCRAPER_URL = os.environ.get("SCRAPER_BASE_URL", "http://127.0.0.1:8080").rstrip
 PORT = int(os.environ.get("PORT", "3000"))
 USER_AGENT = "maps-lead-finder/1.0 (local development app)"
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+HERE_API_KEY = os.environ.get("HERE_API_KEY", "")
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -109,6 +110,17 @@ class Handler(SimpleHTTPRequestHandler):
             return self.proxy("GET", "/api/v1/jobs")
         if parsed.path == "/api/job-sources":
             return self.json_response(200, {"sources": available_sources()})
+        if parsed.path == "/api/map-config":
+            # Prefer Google Maps, then HERE, then keyless OpenStreetMap. The key
+            # is sent to the browser so the map library can load; restrict it by
+            # HTTP referrer in the Google/HERE console.
+            if GOOGLE_MAPS_API_KEY:
+                provider, key = "google", GOOGLE_MAPS_API_KEY
+            elif HERE_API_KEY:
+                provider, key = "here", HERE_API_KEY
+            else:
+                provider, key = "osm", ""
+            return self.json_response(200, {"provider": provider, "key": key})
         return super().do_GET()
 
     def do_POST(self):

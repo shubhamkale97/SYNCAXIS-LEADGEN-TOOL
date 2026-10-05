@@ -75,6 +75,11 @@
           <output id="radiusValue" for="radius">10 km</output>
         </div></div>
         <div class="col-12"><label class="check"><input id="email" type="checkbox"><span>Look for public emails <small>(slower)</small></span></label></div>
+        <div class="field col-12 col-lg-6">
+          <label for="fieldCompany">Company (optional) — check it's in the field above</label>
+          <div class="input-wrap"><input id="fieldCompany" placeholder="e.g. Hinduja Tech"></div>
+        </div>
+        <div class="col-12"><div id="fieldResult" class="genre-result hidden" aria-live="polite"></div></div>
       </form>
       <p class="notice">Start with a small search. Repeated or high-volume collection may be rate-limited and may be restricted by Google’s terms.</p>
     </section>
@@ -82,30 +87,6 @@
     <section class="map-card">
       <div class="map-head"><p class="eyebrow">SEARCH AREA</p><span id="mapHint" class="map-hint">Set a location to see it here</span></div>
       <div id="map" class="map-canvas" role="img" aria-label="Map of the selected search area and leads"></div>
-    </section>
-
-    <section class="search-card genre-card">
-      <p class="eyebrow">FIELD CHECK</p>
-      <h2 class="genre-heading">Is this company actually in the field you're searching?</h2>
-      <p class="subhead">Checks a company's job postings for your keyword and tells you whether it really operates in that field.</p>
-      <form id="genreForm" class="row g-3 align-items-start">
-        <div class="field col-12 col-lg-4">
-          <label for="genreCompany">Company</label>
-          <div class="input-wrap"><input id="genreCompany" placeholder="e.g. Portescap" required></div>
-        </div>
-        <div class="field col-12 col-lg-3">
-          <label for="genreField">Field / keyword</label>
-          <div class="input-wrap"><input id="genreField" placeholder="e.g. electronics" required></div>
-        </div>
-        <div class="field col-12 col-lg-3">
-          <label for="genreCity">City</label>
-          <div class="input-wrap"><input id="genreCity" placeholder="e.g. Pune" required></div>
-        </div>
-        <div class="search-submit col-12 col-lg-2">
-          <button id="genreButton" class="btn btn-primary w-100" type="submit"><span>Check field</span></button>
-        </div>
-      </form>
-      <div id="genreResult" class="genre-result hidden" aria-live="polite"></div>
     </section>
 
     <section id="progress" class="progress hidden" aria-live="polite">
