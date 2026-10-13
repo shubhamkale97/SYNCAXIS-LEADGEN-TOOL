@@ -16,10 +16,19 @@ retained in the `leadgen_meta` Docker volume; a first-time offline start shows 2
 
 ```bash
 docker compose up --build -d
-curl http://127.0.0.1:3000/api/health
+curl http://127.0.0.1:3000/healthz        # the web app is up
+curl http://127.0.0.1:3000/api/health     # ...and can reach the scraper
 ```
 
 Open `http://127.0.0.1:3000`. Stop it with `docker compose down`.
+
+The container runs as an unprivileged user, has Docker `HEALTHCHECK`, and drops
+all Linux capabilities (see `docker-compose.yml`). **Upgrading from an earlier
+version:** the existing `leadgen_meta` volume is owned by root, so the new
+unprivileged user cannot write to it (the app keeps working, but the year and
+job-result caches are silently skipped). Fix it once with
+`docker compose run --rm --user root --entrypoint chown web -R 10001:10001 /var/lib/leadgen`
+or recreate the volume with `docker compose down -v`.
 
 ### LAN access
 
@@ -35,19 +44,34 @@ Then recreate the web container:
 docker compose up --build -d --force-recreate
 ```
 
-Other devices on the same network can open `http://192.168.3.9:3000`. Allow inbound TCP port 3000 in the host firewall for the private network profile. The scraper API remains internal to Docker and is not published.
+Other devices on the same network can open `http://192.168.3.9:3000`. Allow inbound TCP port 3000 in the host firewall for the private network profile. The scraper API remains internal to Docker and is not published. **Set `AUTH_USER` and `AUTH_PASSWORD` in the same `.env` before doing this** (see [Security and operations](#security-and-operations)).
 
-`GOOGLE_MAPS_API_KEY` is optional. When present with the **Geocoding API** enabled, it resolves typed locations server-side and is never sent to the browser. Without a key, Atlas tries OpenStreetMap Nominatim. If public geocoding is blocked or offline, users can choose **Use my location** (browser geolocation) or enter latitude/longitude manually; those paths require no geocoding API or key.
+`GOOGLE_MAPS_API_KEY` is optional. When present with the **Geocoding API** enabled, it resolves typed locations server-side. It is sent to browsers only if you use Google for the map and have not set a separate `GOOGLE_MAPS_BROWSER_KEY` (see [Map view](#map-view)). Without a key, the tool uses OpenStreetMap Nominatim (throttled to one request per second, with results cached for a day). If public geocoding is blocked or offline, users can choose **Use my location** (browser geolocation) or enter latitude/longitude manually; those paths require no geocoding API or key.
 
 Business results use a scraper rather than Google's official Places API and can be rate-limited. Start with depth 3–5, avoid repeated bulk jobs, follow Google's terms and applicable privacy/marketing laws, and verify results before using them.
 
 ## Architecture
 
-- `app.py`: dependency-free Python web server, API gateway, input validation, and Nominatim geocoding.
+- `app.py`: Python standard-library web server, API gateway, input validation, authentication, rate limiting, and geocoding.
+- `jobsources.py`: job-posting sources, parallel search, result cache and de-duplication.
+- `genre.py`: industry classification and the "is this company in this field" check.
+- `textutil.py`: whole-word keyword matching and company-name matching shared by the above.
 - `web/`: responsive frontend.
 - `google-maps-scraper`: server-side scraper container; it is not directly exposed to the host.
 
 The app itself is bound to `127.0.0.1` by default. `HOST_BIND` can expose it to a trusted LAN. Add authentication and TLS before exposing it to the public Internet.
+
+## Security and operations
+
+Everything below is configured in `.env` (see `.env.example`):
+
+- **Authentication** - set both `AUTH_USER` and `AUTH_PASSWORD` to require HTTP Basic authentication for the UI and API (browsers show a login prompt once). It is off by default so a localhost-only install keeps working. Basic auth sends the password with every request, so put the app behind HTTPS (a reverse proxy such as Caddy or nginx) if it is reachable beyond a trusted network. `GET /healthz` stays open for container health checks and returns no data.
+- **Rate limiting** - `RATE_LIMIT_PER_MIN` (default 60, `0` disables) limits searches and geocoding per client address; excess requests get `429` with `Retry-After`. Behind a reverse proxy all requests share the proxy's address.
+- **Request limits** - bodies over `MAX_BODY_BYTES` (default 64 KB) are rejected with `413`, malformed JSON with `400`, and idle connections are dropped after 30 seconds.
+- **Errors** - upstream and internal error details go to the log (`LOG_LEVEL`), not to API clients.
+- **Map keys** - keep `GOOGLE_MAPS_API_KEY` server-side and give the browser a separate, referrer-restricted `GOOGLE_MAPS_BROWSER_KEY`.
+- **Process** - `BIND_HOST` (default `127.0.0.1`; the container image sets `0.0.0.0` internally and `HOST_BIND` controls what the host publishes), unprivileged container user, capabilities dropped, memory/process limits (`WEB_MEM_LIMIT`).
+- **Responses** carry `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy` headers, and directory listings are disabled.
 
 ## Company industry from job postings
 
@@ -56,25 +80,42 @@ advertised in a given city. It searches one or more job sources, then classifies
 the company from the roles' titles and descriptions - keyword heuristics first,
 with an optional LLM fallback for ambiguous cases.
 
-Every source has a free tier, so the tool can run entirely on free options: the ATS boards, LinkedIn's guest endpoint and SerpAPI need no payment (SerpAPI gives 250 searches/month free), and Adzuna and Jooble issue free keys.
+Every source has a free tier, so the tool can run entirely on free options: the ATS boards and SerpAPI need no payment (SerpAPI gives 250 searches/month free), and Adzuna and Jooble issue free keys.
 
 ### Sources
 
-Selected by `JOB_SOURCES` (comma separated) or per request via the `sources`
-field. Credentials live in the environment:
+Selected per request via the `sources` field, else by `JOB_SOURCES` (comma
+separated), else the **default set: `ats`, `adzuna`, `jooble`, `serpapi`** - the
+official-API and employer-board sources. The scraping sources (`linkedin`,
+`jobspy`) are **off unless you name them**, because they breach those sites'
+terms and risk IP blocks. Credentials live in the environment:
 
-| Source | Needs | Notes |
-| --- | --- | --- |
-| `ats` | nothing | Keyless public Greenhouse/Lever/Ashby boards - no scraping, no ToS issue. Needs the company slug. |
-| `linkedin` | nothing | Scrapes LinkedIn's public guest endpoint. Rate limited and **against LinkedIn's User Agreement** - prefer an API source. |
-| `adzuna` | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` | Free tier; India via `ADZUNA_COUNTRY=in`. |
-| `jooble` | `JOOBLE_API_KEY` | Free key on request; 60+ countries. |
-| `jobspy` | `python-jobspy` package | Optional multi-board library: LinkedIn/Indeed/Glassdoor/Google/Naukri. Same ToS caveats as scraping. |
-| `serpapi` | `SERPAPI_API_KEY` | Google Jobs panel; aggregates LinkedIn/Indeed listings. |
+| Source | Default | Needs | Notes |
+| --- | --- | --- | --- |
+| `ats` | yes | nothing | Keyless public Greenhouse/Lever/Ashby boards - no scraping, no ToS issue. Looked up by **company name**, so it only runs for `company-genre` / `company-match`, and only returns postings in the requested city. |
+| `adzuna` | yes | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` | Free tier; India via `ADZUNA_COUNTRY=in`. |
+| `jooble` | yes | `JOOBLE_API_KEY` | Free key on request; 60+ countries. |
+| `serpapi` | yes | `SERPAPI_API_KEY` | Google Jobs panel; aggregates LinkedIn/Indeed listings. |
+| `linkedin` | no | nothing | Scrapes LinkedIn's public guest endpoint. Rate limited and **against LinkedIn's User Agreement** - prefer an API source. |
+| `jobspy` | no | `python-jobspy` package | Optional multi-board library: LinkedIn/Indeed/Glassdoor/Google/Naukri. Same ToS caveats as scraping. |
+
+Selected sources run in parallel; one failing never hides the others. The
+`sources` array in each response reports `count`, `cached`, `skipped` (e.g. `ats`
+without a company) or `error` per source.
+
+### Caching and quotas
+
+Successful, non-empty lookups are cached in SQLite (inside the `leadgen_meta`
+volume) for `JOBS_CACHE_TTL` seconds (default 6 hours; `0` disables). Repeating a
+company or keyword search therefore does not spend Adzuna/SerpAPI quota again.
+Failed and empty results are never cached. Headless Chromium runs at most
+`BROWSER_MAX_CONCURRENCY` (default 1) at a time; other searches wait up to
+`BROWSER_QUEUE_TIMEOUT` seconds and then fall back to plain HTTP.
 
 ### Endpoints
 
-- `GET /api/job-sources` - which sources are configured, with their limits.
+- `GET /healthz` - liveness (no auth, no upstream calls). `GET /api/health` also checks the scraper.
+- `GET /api/job-sources` - which sources are configured, whether they are on by default, and their limits.
 - `POST /api/job-search` - raw search: `{"keyword": "design engineer", "city": "Pune", "pages": 2, "sources": ["adzuna"]}`.
 - `POST /api/company-genre` - `{"company": "Portescap", "city": "Pune"}` returns the inferred genre, confidence, the method used, and the sample titles behind it.
 - `POST /api/company-match` - `{"company": "Hinduja Tech", "keyword": "hardware", "city": "Pune"}` returns a yes/no verdict on whether the company is actually in that field, with the evidence behind it.
@@ -94,7 +135,11 @@ and SerpAPI allows 250 searches/month on the free plan.
 
 Set `LLM_API_KEY` (and optionally `LLM_BASE_URL`, `LLM_MODEL`) to enable an
 OpenAI-compatible classification call when the heuristic confidence is low.
-Without it, the heuristic answer is used.
+Without it, the heuristic answer is used. Job postings are untrusted text, so
+they are sent as delimited data with an instruction not to follow anything in
+them, and the answer is only accepted if it names one of the built-in
+industries (otherwise the heuristic result stands). Posting titles and short
+description excerpts are sent to the configured provider.
 
 ### UI
 
@@ -118,7 +163,7 @@ The map shows the whole search visually:
 The provider is chosen by `GET /api/map-config` from `MAP_PROVIDER`
 (`auto` | `google` | `here` | `osm`):
 
-- **google** - needs `GOOGLE_MAPS_API_KEY` with the Maps JavaScript API enabled;
+- **google** - needs a key with the Maps JavaScript API enabled: `GOOGLE_MAPS_BROWSER_KEY` (recommended, a separate key restricted by HTTP referrer), or `GOOGLE_MAPS_API_KEY` if no browser key is set;
 - **here** - needs `HERE_API_KEY`; HERE raster tiles are served through the
   locally vendored Leaflet;
 - **osm** - keyless OpenStreetMap through the same Leaflet.
@@ -126,7 +171,7 @@ The provider is chosen by `GET /api/map-config` from `MAP_PROVIDER`
 `auto` prefers Google, then HERE, then OpenStreetMap; a provider whose key is
 missing falls back to OpenStreetMap. The map key is sent to the browser (the map
 library needs it), so restrict it by HTTP referrer / allowed domain in the
-provider console. Any provider needs outbound internet at runtime - the same
+provider console, and do not reuse the server-side geocoding key for it. Any provider needs outbound internet at runtime - the same
 requirement as geocoding.
 
 **HERE free tier:** a HERE platform account includes a free monthly allowance
@@ -142,7 +187,12 @@ then checks whether the keyword - or, when the keyword names a whole industry,
 that industry's terms - appears in them. A posting naming the field in its
 **title** is the strongest signal; two or more mentions anywhere also count. A
 specific term such as "welding" is not broadened to its whole category, so it
-will not match unrelated roles.
+will not match unrelated roles. Matching is whole-word (so "art" does not match
+"smart"), and generic words such as "design", "engineer" or "manager" are
+ignored on their own so a "design engineer" keyword cannot match every
+engineering posting. Company names are compared by token with legal suffixes
+(Ltd, Pvt, Inc, ...) removed; a bare "Tata" therefore matches every Tata
+company, which is a deliberate trade-off.
 
 The response gives `matches` (true / false / null when there are no postings),
 `confidence`, `matched_postings`, `title_matches`, the expanded `field_terms`,
@@ -155,7 +205,8 @@ more text, and prefer the `ats` source where descriptions are included.
 ### De-duplication
 
 `search_jobs` merges the same posting seen on more than one source into a single
-combined record: the longest description wins, the other fields fill in from
+combined record - only when the locations are compatible, so the same title at
+the same company in two different cities stays as two postings: the longest description wins, the other fields fill in from
 whichever source had them, and every source is listed under `sources`. The API
 reports `postings_found` (raw), `postings_unique`, and `duplicates_merged`.
 
@@ -173,14 +224,27 @@ Three requirement files, all optional in code:
 - `requirements-optional.txt` - `python-jobspy` (pulls pandas/numpy). Skip it
   with `--build-arg INSTALL_JOBSPY=false`.
 
+Dependencies are pinned to compatible version ranges (not exact versions) and
+Dependabot opens weekly update PRs. The image copies `*.py` so new modules are
+included, runs as an unprivileged user, and has a `HEALTHCHECK`.
+
 The base image is `python:3.12-slim` (native wheels need glibc, not alpine).
 Every package is optional in code: `jobsources.py` degrades to the standard
 library if one is missing, so the app runs regardless.
 
+### Tests
+
+```
+python -m unittest discover -s tests -v
+```
+
+Set `JOBS_CACHE_TTL=0` to bypass the result cache. The same suite runs in CI
+(`.github/workflows/ci.yml`) on pull requests and before every image build.
+
 ### Deploying from GitHub Actions
 
-`.github/workflows/deploy.yml` builds the image on every push to `main` and
-publishes it to GHCR. It also has a manual **deploy** job that runs on a
+`.github/workflows/deploy.yml` runs the CI checks, then (only if they pass)
+builds the image on every push to `main` and publishes it to GHCR. It also has a manual **deploy** job that runs on a
 self-hosted runner and injects the map key from a repository secret:
 
 1. Repo -> Settings -> Secrets and variables -> Actions -> add `HERE_API_KEY`.
