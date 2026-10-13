@@ -1,0 +1,72 @@
+name: CI
+
+# Runs on pull requests and is reused by deploy.yml, so an image is only
+# published from main when these checks pass.
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    env:
+      JOBS_CACHE_TTL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install runtime packages
+        run: pip install -r requirements.txt
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -v
+
+  docker:
+    name: Image builds, runs as non-root and reports healthy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (without the heavy optional tiers)
+        run: >
+          docker build -t leadgen-ci
+          --build-arg INSTALL_PLAYWRIGHT=false
+          --build-arg INSTALL_JOBSPY=false .
+      - name: Start the container
+        run: docker run -d --name leadgen-ci -p 127.0.0.1:3000:3000 leadgen-ci
+      - name: Wait for the health check
+        run: |
+          for attempt in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' leadgen-ci)
+            echo "health: $status"
+            [ "$status" = "healthy" ] && exit 0
+            sleep 2
+          done
+          docker logs leadgen-ci
+          exit 1
+      - name: Check the process is unprivileged and the API answers
+        run: |
+          test "$(docker exec leadgen-ci id -u)" != "0"
+          curl --fail --silent http://127.0.0.1:3000/healthz
+          curl --fail --silent http://127.0.0.1:3000/api/job-sources > /dev/null
+
+  audit:
+    name: Dependency vulnerability scan (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt -r requirements-heavy.txt -r requirements-optional.txt

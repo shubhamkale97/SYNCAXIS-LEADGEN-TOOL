@@ -7,9 +7,12 @@ normalised job dicts::
     {"title", "company", "location", "description", "url", "posted", "source"}
 
 Sources are chosen by the ``JOB_SOURCES`` environment variable (comma
-separated names) and by whether their credentials are present:
+separated names) and by whether their credentials are present. When
+``JOB_SOURCES`` is unset only the API-based sources run (``DEFAULT_SOURCES``);
+the scraping sources (linkedin, jobspy) must be named explicitly:
 
     ats        no key; reads employers' own Greenhouse/Lever/Ashby boards.
+               Needs a company name, so it only runs for company queries.
     linkedin   no key; scrapes LinkedIn's public guest endpoint.
     jobspy     no key, but needs the ``python-jobspy`` package installed.
     adzuna     needs ADZUNA_APP_ID + ADZUNA_APP_KEY (free tier).
@@ -26,21 +29,36 @@ module still runs on a bare interpreter:
     beautifulsoup4   robust HTML parsing (with lxml) for LinkedIn cards,
     lxml             falling back to a regex parser if bs4 is missing.
 
-``search_jobs`` merges duplicate postings found on more than one source into a
+``search_jobs`` runs the selected sources in parallel, caches successful
+results for ``JOBS_CACHE_TTL`` seconds so repeat lookups do not spend API
+quota, and merges duplicate postings found on more than one source into a
 single combined record (see ``dedupe_jobs``).
 """
 
+import hashlib
 import importlib.util
 import json
+import logging
 import os
 import re
+import sqlite3
+import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from html import unescape
+
+from textutil import company_tokens, tokens
+
+log = logging.getLogger("leadgen.jobs")
 
 USER_AGENT = "syncaxis-leadgen/1.0 (+local development app)"
 DEFAULT_TIMEOUT = 25
+# Sources that run when JOB_SOURCES is unset: official APIs and employers' own
+# boards only. Scraping sources are opt-in via JOB_SOURCES.
+DEFAULT_SOURCES = ("ats", "adzuna", "jooble", "serpapi")
 _CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -130,6 +148,35 @@ def _clean(text):
     return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", text or ""))).strip()
 
 
+def _html_to_text(text):
+    """Plain text of a posting body, including HTML that arrives entity-escaped.
+
+    Greenhouse returns ``content`` as escaped HTML (``&lt;p&gt;...``); decoding
+    before stripping tags leaves clean text for keyword matching.
+    """
+    return _clean(unescape(text or ""))
+
+
+def normalize_posted(value):
+    """Posting date as text; epoch seconds/milliseconds become an ISO date.
+
+    Lever reports ``createdAt`` as epoch milliseconds. Other values (ISO
+    strings, "3 days ago") pass through unchanged.
+    """
+    if value is None or value == "":
+        return ""
+    text = str(value).strip()
+    if re.fullmatch(r"\d{9,13}(?:\.\d+)?", text):
+        number = float(text)
+        if number > 1e11:  # milliseconds
+            number /= 1000
+        try:
+            return datetime.fromtimestamp(number, tz=timezone.utc).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            return text
+    return text
+
+
 def _env_proxy():
     for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         value = os.environ.get(name)
@@ -154,50 +201,60 @@ def _playwright_proxy(proxy):
     return {"server": value if "://" in value else f"http://{value}"}
 
 
+# Each headless Chromium is large; the HTTP server is threaded, so cap how many
+# can run at once (extra callers queue, then fall back to plain HTTP).
+_BROWSER_SLOTS = threading.BoundedSemaphore(
+    max(1, int(os.environ.get("BROWSER_MAX_CONCURRENCY", "1")))
+)
+
+
 def _browser_fetch_many(urls, *, timeout_ms=None, wait_selector=None, proxy=None):
     """Fetch pages with headless Chromium (Playwright), reusing one browser.
 
     Returns one HTML string per URL; a failure yields an empty string so the
-    caller can carry on with the remaining pages.
+    caller can carry on with the remaining pages. Raises RuntimeError when the
+    browser is unavailable or stays busy past ``BROWSER_QUEUE_TIMEOUT`` seconds.
     """
     if sync_playwright is None:
         raise RuntimeError("playwright is not installed")
-    timeout_ms = timeout_ms or int(os.environ.get("BROWSER_TIMEOUT_MS", "30000"))
-    launch_kwargs = {
-        "headless": os.environ.get("BROWSER_HEADLESS", "true").lower() != "false",
-        "args": [
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-        ],
-    }
-    proxy_config = _playwright_proxy(proxy or _env_proxy())
-    if proxy_config:
-        launch_kwargs["proxy"] = proxy_config
-    results = []
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(**launch_kwargs)
-        context = browser.new_context(
-            user_agent=_CHROME_UA, locale="en-US",
-            viewport={"width": 1366, "height": 900},
-        )
-        for url in urls:
-            page = context.new_page()
-            try:
-                page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-                if wait_selector:
-                    try:
-                        page.wait_for_selector(wait_selector, timeout=timeout_ms)
-                    except Exception:  # noqa: BLE001 - selector may never appear
-                        pass
-                results.append(page.content())
-            except Exception:  # noqa: BLE001
-                results.append("")
-            finally:
-                page.close()
-        context.close()
-        browser.close()
-    return results
+    queue_timeout = float(os.environ.get("BROWSER_QUEUE_TIMEOUT", "120"))
+    if not _BROWSER_SLOTS.acquire(timeout=queue_timeout):
+        raise RuntimeError("browser is busy with other searches")
+    try:
+        timeout_ms = timeout_ms or int(os.environ.get("BROWSER_TIMEOUT_MS", "30000"))
+        launch_kwargs = {
+            "headless": os.environ.get("BROWSER_HEADLESS", "true").lower() != "false",
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+        }
+        proxy_config = _playwright_proxy(proxy or _env_proxy())
+        if proxy_config:
+            launch_kwargs["proxy"] = proxy_config
+        results = []
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(**launch_kwargs)
+            context = browser.new_context(
+                user_agent=_CHROME_UA, locale="en-US",
+                viewport={"width": 1366, "height": 900},
+            )
+            for url in urls:
+                page = context.new_page()
+                try:
+                    page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                    if wait_selector:
+                        try:
+                            page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                        except Exception:  # noqa: BLE001 - selector may never appear
+                            pass
+                    results.append(page.content())
+                except Exception:  # noqa: BLE001
+                    results.append("")
+                finally:
+                    page.close()
+            context.close()
+            browser.close()
+        return results
+    finally:
+        _BROWSER_SLOTS.release()
 
 
 # --------------------------------------------------------------------------- #
@@ -283,6 +340,7 @@ class JobSource:
     name = "base"
     kind = "api"          # "api" | "scrape"
     risky = False         # True when use may breach the site's terms
+    needs_company = False  # True when the source can only look up a named company
     page_size = 25
     min_interval = 1.0    # seconds to wait between requests to this source
 
@@ -384,8 +442,8 @@ class LinkedInGuestSource(JobSource):
                 jobs = self._search_browser(urls, limit)
                 if jobs:
                     return jobs[:limit] if limit else jobs
-            except Exception:  # noqa: BLE001 - browser unavailable; fall back to HTTP
-                pass
+            except Exception as error:  # noqa: BLE001 - browser unavailable; fall back to HTTP
+                log.warning("LinkedIn browser engine failed (%s); falling back to HTTP", error)
         jobs = self._search_http(urls, limit)
         return jobs[:limit] if limit else jobs
 
@@ -480,17 +538,24 @@ class JobSpySource(JobSource):
 # --------------------------------------------------------------------------- #
 
 def candidate_slugs(name):
-    """Turn a company name into likely ATS board slugs."""
-    base = re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
-    if not base:
-        return []
-    compact = base.replace(" ", "")
-    hyphenated = base.replace(" ", "-")
-    return list(dict.fromkeys([compact, hyphenated]))
+    """Turn a company name into likely ATS board slugs.
+
+    Tries the name as written and with legal suffixes dropped, so
+    "Acme Corp Pvt Ltd" also yields "acme" / "acme-corp".
+    """
+    variants = []
+    for words in (tokens(name), company_tokens(name)):
+        if words:
+            variants.extend(["".join(words), "-".join(words)])
+    return list(dict.fromkeys(variants))
 
 
-def _fetch_ats(provider, slug):
-    """Fetch one employer's open roles from a keyless public ATS board."""
+def _fetch_ats(provider, slug, display_name=None):
+    """Fetch one employer's open roles from a keyless public ATS board.
+
+    ``display_name`` is the company name to report when the board itself does
+    not carry one (Lever), instead of the raw board slug.
+    """
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     jobs = []
     if provider == "greenhouse":
@@ -499,11 +564,11 @@ def _fetch_ats(provider, slug):
         for item in data.get("jobs", []):
             jobs.append({
                 "title": item.get("title", ""),
-                "company": item.get("company_name") or slug,
+                "company": item.get("company_name") or display_name or slug,
                 "location": (item.get("location") or {}).get("name", ""),
-                "description": item.get("content", "") or "",
+                "description": _html_to_text(item.get("content", "")),
                 "url": item.get("absolute_url", ""),
-                "posted": item.get("updated_at", "") or item.get("first_published", ""),
+                "posted": normalize_posted(item.get("updated_at") or item.get("first_published")),
                 "source": "ats:greenhouse",
             })
     elif provider == "lever":
@@ -513,11 +578,11 @@ def _fetch_ats(provider, slug):
             categories = item.get("categories") or {}
             jobs.append({
                 "title": item.get("text", ""),
-                "company": slug,
+                "company": display_name or slug,
                 "location": categories.get("location", "") or "",
                 "description": item.get("descriptionPlain", "") or "",
                 "url": item.get("hostedUrl", ""),
-                "posted": item.get("createdAt", "") or "",
+                "posted": normalize_posted(item.get("createdAt")),
                 "source": "ats:lever",
             })
     elif provider == "ashby":
@@ -526,11 +591,11 @@ def _fetch_ats(provider, slug):
         for item in data.get("jobs", []):
             jobs.append({
                 "title": item.get("title", ""),
-                "company": item.get("companyName") or slug,
+                "company": item.get("companyName") or display_name or slug,
                 "location": item.get("location", "") or "",
                 "description": item.get("descriptionPlain", "") or "",
                 "url": item.get("jobUrl", ""),
-                "posted": item.get("publishedAt", "") or "",
+                "posted": normalize_posted(item.get("publishedAt")),
                 "source": "ats:ashby",
             })
     return jobs
@@ -540,6 +605,7 @@ class ATSSource(JobSource):
     name = "ats"
     kind = "api"
     risky = False
+    needs_company = True  # boards are looked up by company name, not by job keyword
 
     def __init__(self):
         self.providers = [
@@ -561,26 +627,32 @@ class ATSSource(JobSource):
             ),
         }
 
-    def search(self, keyword, location, pages=1, limit=None):
-        slugs = candidate_slugs(keyword)
+    def search(self, keyword, location, pages=1, limit=None, company=None):
+        # Boards are named after the employer, so look up the company name.
+        # A bare keyword is only used when no company was given (legacy callers).
+        name = company or keyword
+        slugs = candidate_slugs(name)
         jobs = []
         for provider in self.providers:
             for slug in slugs:
                 try:
-                    jobs.extend(_fetch_ats(provider, slug))
-                except Exception:  # noqa: BLE001 - a miss just means no board here
+                    jobs.extend(_fetch_ats(provider, slug, display_name=name))
+                except Exception as error:  # noqa: BLE001 - a miss just means no board here
+                    log.debug("ATS %s board %r not available: %s", provider, slug, error)
                     continue
                 if limit and len(jobs) >= limit:
                     break
             if limit and len(jobs) >= limit:
                 break
         if location:
+            # Keep postings in the requested city (or with no location, e.g.
+            # remote). Never fall back to other cities: a company's postings
+            # elsewhere say nothing about its presence here.
             wanted = location.lower()
-            filtered = [
+            jobs = [
                 job for job in jobs
                 if not job.get("location") or wanted in job["location"].lower()
             ]
-            jobs = filtered or jobs
         seen, unique = set(), []
         for job in jobs:
             key = (job["title"].lower(), job["company"].lower(), job["url"])
@@ -769,27 +841,46 @@ def _norm(text):
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+def _locations_compatible(first, second):
+    """Whether two location strings can describe the same place.
+
+    A missing location is compatible with anything, and "Pune" is compatible
+    with "Pune, Maharashtra, India"; "Pune" and "Bangalore" are not.
+    """
+    first, second = _norm(first), _norm(second)
+    if not first or not second:
+        return True
+    return first == second or first in second or second in first
+
+
 def dedupe_jobs(jobs):
     """Merge duplicate postings across sources into one combined record.
 
     Two postings are treated as the same job when their normalised title and
-    company match (falling back to the URL when both are empty). A merged
-    record keeps the longest description, the first non-empty value for the
-    other fields, and lists every source it was seen on under ``sources``.
+    company match *and* their locations are compatible, so the same title
+    advertised in two different cities stays two postings (falling back to the
+    URL when title and company are both empty). A merged record keeps the
+    longest description, the first non-empty value for the other fields, and
+    lists every source it was seen on under ``sources``.
     """
-    merged = {}
-    order = []
+    groups = {}
+    records = []
     for job in jobs:
         key = (_norm(job.get("title")), _norm(job.get("company")))
         if key == ("", ""):
             key = ("url", job.get("url", ""))
-        if key not in merged:
+        candidates = groups.setdefault(key, [])
+        record = next(
+            (item for item in candidates
+             if _locations_compatible(item.get("location"), job.get("location"))),
+            None,
+        )
+        if record is None:
             record = dict(job)
             record["sources"] = [job["source"]] if job.get("source") else []
-            merged[key] = record
-            order.append(key)
+            candidates.append(record)
+            records.append(record)
             continue
-        record = merged[key]
         source = job.get("source")
         if source and source not in record["sources"]:
             record["sources"].append(source)
@@ -798,7 +889,80 @@ def dedupe_jobs(jobs):
         for field in ("location", "url", "posted", "company_industry", "skills"):
             if not record.get(field) and job.get(field):
                 record[field] = job[field]
-    return [merged[key] for key in order]
+    return records
+
+
+# --------------------------------------------------------------------------- #
+# Result cache: repeat lookups should not spend API quota again
+# --------------------------------------------------------------------------- #
+
+def _cache_ttl():
+    """Cache lifetime in seconds (``JOBS_CACHE_TTL``); 0 disables caching."""
+    try:
+        return max(0, int(os.environ.get("JOBS_CACHE_TTL", "21600")))
+    except ValueError:
+        return 0
+
+
+def _cache_connect():
+    path = os.environ.get("JOBS_CACHE_DB", "/var/lib/leadgen/jobs-cache.sqlite")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    connection = sqlite3.connect(path, timeout=5)
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS results ("
+        "key TEXT PRIMARY KEY, created REAL NOT NULL, payload TEXT NOT NULL)"
+    )
+    return connection
+
+
+def _cache_key(source, keyword, location, pages, limit, company):
+    raw = json.dumps(
+        [source, (keyword or "").strip().lower(), (location or "").strip().lower(),
+         int(pages), limit, (company or "").strip().lower()]
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_get(key):
+    """Cached jobs for ``key`` if fresh, else None. Never raises."""
+    ttl = _cache_ttl()
+    if not ttl:
+        return None
+    try:
+        connection = _cache_connect()
+        try:
+            row = connection.execute(
+                "SELECT payload FROM results WHERE key = ? AND created > ?",
+                (key, time.time() - ttl),
+            ).fetchone()
+        finally:
+            connection.close()
+        return json.loads(row[0]) if row else None
+    except Exception as error:  # noqa: BLE001 - the cache is best effort
+        log.debug("job cache read skipped: %s", error)
+        return None
+
+
+def _cache_put(key, jobs):
+    """Store ``jobs`` under ``key`` and drop expired rows. Never raises."""
+    ttl = _cache_ttl()
+    if not ttl or not jobs:
+        return
+    try:
+        connection = _cache_connect()
+        try:
+            with connection:
+                connection.execute(
+                    "DELETE FROM results WHERE created <= ?", (time.time() - ttl,)
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO results (key, created, payload) VALUES (?, ?, ?)",
+                    (key, time.time(), json.dumps(jobs)),
+                )
+        finally:
+            connection.close()
+    except Exception as error:  # noqa: BLE001 - the cache is best effort
+        log.debug("job cache write skipped: %s", error)
 
 
 def _registry():
@@ -816,6 +980,8 @@ def available_sources():
                 "configured": source.configured(),
                 "kind": source.kind,
                 "risky": source.risky,
+                "needs_company": source.needs_company,
+                "default": source.name in DEFAULT_SOURCES,
                 "limits": source.limits(),
             }
         )
@@ -823,13 +989,17 @@ def available_sources():
 
 
 def selected_sources(names=None):
-    """Instantiate the requested (or env-selected) sources that are configured."""
+    """Instantiate the requested (or env-selected) sources that are configured.
+
+    Precedence: names passed per request, then ``JOB_SOURCES``, then
+    ``DEFAULT_SOURCES`` (API-based sources only; scrapers are opt-in).
+    """
     registry = _registry()
     if names:
         wanted = [str(n).strip().lower() for n in names]
     else:
         env = os.environ.get("JOB_SOURCES", "").strip()
-        wanted = [n.strip().lower() for n in env.split(",") if n.strip()] if env else list(registry)
+        wanted = [n.strip().lower() for n in env.split(",") if n.strip()] if env else list(DEFAULT_SOURCES)
     chosen = []
     for name in wanted:
         cls = registry.get(name)
@@ -841,23 +1011,59 @@ def selected_sources(names=None):
     return chosen
 
 
-def search_jobs(keyword, location, pages=1, limit_per_source=40, sources=None):
+def _run_source(source, keyword, location, pages, limit, company):
+    """Run one source (through the cache). Returns (jobs, cached, error)."""
+    key = _cache_key(source.name, keyword, location, pages, limit, company)
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached, True, None
+    try:
+        if source.needs_company:
+            found = source.search(keyword, location, pages=pages, limit=limit, company=company)
+        else:
+            found = source.search(keyword, location, pages=pages, limit=limit)
+    except Exception as error:  # noqa: BLE001 - surface any source failure
+        log.warning("job source %s failed: %s: %s", source.name, type(error).__name__, error)
+        return [], False, f"{type(error).__name__}: {error}"
+    _cache_put(key, found)
+    return found, False, None
+
+
+def search_jobs(keyword, location, pages=1, limit_per_source=40, sources=None, company=None):
     """Search every selected source and return (jobs, per_source_report).
 
-    Results from all sources are merged and de-duplicated, so a posting that
-    appears on more than one board is returned once with a combined record. A
-    failing source is reported but never aborts the others.
+    Sources run in parallel. Results from all sources are merged and
+    de-duplicated, so a posting that appears on more than one board is returned
+    once with a combined record. A failing source is reported but never aborts
+    the others. Sources that can only look up a named employer (``ats``) are
+    skipped unless ``company`` is given.
     """
+    chosen = selected_sources(sources)
+    runnable = [source for source in chosen if company or not source.needs_company]
+    workers = max(1, min(len(runnable), int(os.environ.get("JOB_SOURCE_WORKERS", "4"))))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_run_source, source, keyword, location, pages, limit_per_source, company)
+            for source in runnable
+        ]
+    outcomes = iter(futures)
     raw = []
     report = []
-    for source in selected_sources(sources):
-        try:
-            found = source.search(keyword, location, pages=pages, limit=limit_per_source)
-        except Exception as error:  # noqa: BLE001 - surface any source failure
-            report.append({"source": source.name, "error": f"{type(error).__name__}: {error}"})
+    for source in chosen:
+        if source not in runnable:
+            report.append({"source": source.name, "skipped": "needs a company name"})
             continue
+        found, cached, error = next(outcomes).result()
+        if error:
+            report.append({"source": source.name, "error": error})
+            continue
+        for job in found:
+            job["posted"] = normalize_posted(job.get("posted"))
         raw.extend(found)
-        report.append({"source": source.name, "count": len(found), "risky": source.risky})
+        entry = {"source": source.name, "count": len(found), "risky": source.risky}
+        if cached:
+            entry["cached"] = True
+        report.append(entry)
     jobs = dedupe_jobs(raw)
     report.append(
         {

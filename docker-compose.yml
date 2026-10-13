@@ -15,7 +15,16 @@ services:
       SCRAPER_BASE_URL: http://google-maps-scraper:8080
       PORT: "3000"
       GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      GOOGLE_MAPS_BROWSER_KEY: ${GOOGLE_MAPS_BROWSER_KEY:-}
       HERE_API_KEY: ${HERE_API_KEY:-}
+      AUTH_USER: ${AUTH_USER:-}
+      AUTH_PASSWORD: ${AUTH_PASSWORD:-}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-60}
+      NOMINATIM_CONTACT: ${NOMINATIM_CONTACT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JOBS_CACHE_TTL: ${JOBS_CACHE_TTL:-21600}
+      BROWSER_MAX_CONCURRENCY: ${BROWSER_MAX_CONCURRENCY:-1}
+      BROWSER_QUEUE_TIMEOUT: ${BROWSER_QUEUE_TIMEOUT:-120}
       MAP_PROVIDER: ${MAP_PROVIDER:-here}
       JOB_SOURCES: ${JOB_SOURCES:-}
       ADZUNA_APP_ID: ${ADZUNA_APP_ID:-}
@@ -45,6 +54,15 @@ services:
       - leadgen_meta:/var/lib/leadgen
     depends_on:
       - google-maps-scraper
+    # The app runs as an unprivileged user (see Dockerfile); also drop every
+    # Linux capability, block privilege escalation, and cap memory/processes so
+    # one runaway search (e.g. Chromium) cannot take the host down.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${WEB_MEM_LIMIT:-2g}
+    pids_limit: 512
 
 volumes:
   gmaps_data:

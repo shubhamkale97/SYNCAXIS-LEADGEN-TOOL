@@ -16,6 +16,8 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+os.environ.setdefault("JOBS_CACHE_TTL", "0")  # keep the result cache out of these tests
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import app  # noqa: E402
@@ -251,14 +253,16 @@ class GenreTests(unittest.TestCase):
     def test_llm_fallback_used_when_weak(self):
         os.environ["LLM_API_KEY"] = "test"
         original = genre.llm_genre
-        genre.llm_genre = lambda jobs: {"genre": "Robotics", "confidence": 0.7, "reasoning": "x"}
+        genre.llm_genre = lambda jobs: {
+            "genre": "Industrial Automation & Robotics", "confidence": 0.7, "reasoning": "x",
+        }
         try:
             result = genre.infer_genre([{"title": "Generalist", "description": "office admin"}])
         finally:
             genre.llm_genre = original
             os.environ.pop("LLM_API_KEY", None)
         self.assertEqual(result["method"], "llm")
-        self.assertEqual(result["genre"], "Robotics")
+        self.assertEqual(result["genre"], "Industrial Automation & Robotics")
 
 
 class EndpointTests(unittest.TestCase):
