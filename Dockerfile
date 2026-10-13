@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # Browsers live outside any home directory so the unprivileged user can run them.
 ENV PYTHONUNBUFFERED=1 \
