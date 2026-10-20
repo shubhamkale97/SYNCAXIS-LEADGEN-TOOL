@@ -2,4 +2,4 @@
 # guest endpoint in a real browser. Large (~1 GB image); the Dockerfile also
 # runs `playwright install --with-deps chromium`. Skip with
 # `--build-arg INSTALL_PLAYWRIGHT=false` to fall back to curl_cffi.
-playwright>=1.63,<2
+playwright>=1.64.0,<2
